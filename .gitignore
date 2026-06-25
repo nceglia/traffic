@@ -1,0 +1,27 @@
+# --- kept LOCAL: dataset-specific analysis, results, report (not for the public repo) ---
+REPORT.md
+WORKUP.md
+*.json
+figures/
+
+# real-data analysis scripts (depend on the private dataset / encode its findings)
+scripts/fit_real.py
+scripts/drainage_check.py
+scripts/timepoint_cv.py
+scripts/stationarity.py
+scripts/precompute.py
+scripts/mcmc_check.py
+scripts/workup/
+
+# saved model artifacts
+*.npz
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.DS_Store
+.ipynb_checkpoints/

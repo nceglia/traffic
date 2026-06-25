@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "traffic"
+version = "0.1.0"
+description = "Bayesian Gamma-Poisson population-dynamics model for clonal cell trafficking across tissue and phenotype (JAX; conjugate CAVI + NUTS)."
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = ["jax>=0.4", "numpy", "pandas", "numpyro>=0.13"]
+
+[project.optional-dependencies]
+data = ["anndata", "scanpy"]
+viz = ["matplotlib"]
+
+[tool.setuptools.packages.find]
+include = ["traffic*"]
