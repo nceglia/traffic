@@ -16,21 +16,12 @@ class PriorConfig:
 
 
 @dataclass(frozen=True)
-class CAVIConfig:
-    """Coordinate-ascent settings for the conjugate Gamma-Poisson fit."""
-    max_iter: int = 300
-    tol: float = 1e-6      # stop when max relative change in M-hat < tol
-    eps: float = 1e-12     # numerical floor
-
-
-@dataclass(frozen=True)
 class MCMCConfig:
-    """NUTS settings for the marginal Gamma-Poisson posterior over M.
+    """NUTS settings for the marginal posterior over M.
 
     Samples M directly from p(M | data): the per-source allocations marginalize
-    exactly by Poisson superposition (model_methods.tex Section 5), so the target
-    is the smooth L x L posterior with no auxiliary variables. Unlike CAVI, the
-    sample spread is the full (non-factorized) posterior uncertainty.
+    exactly by Poisson superposition, so the target is the smooth L x L posterior
+    with no auxiliary variables.
     """
     num_warmup: int = 800
     num_samples: int = 800

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "traffic"
 version = "0.1.0"
-description = "Bayesian Gamma-Poisson population-dynamics model for clonal cell trafficking across tissue and phenotype (JAX; conjugate CAVI + NUTS)."
+description = "Bayesian Gamma-Poisson population-dynamics model for clonal cell trafficking across tissue and phenotype (JAX + NumPyro; NUTS)."
 requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = ["jax>=0.4", "numpy", "pandas", "numpyro>=0.13"]

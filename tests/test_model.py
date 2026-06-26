@@ -5,15 +5,19 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
 
-from traffic import CAVIConfig, PriorConfig, fit, model, readouts, simulate, statespace
+from traffic import MCMCConfig, PriorConfig, fit_nuts, model, readouts, simulate, statespace
 
 
-def test_recovery():
-    Xt, Y, D, m, Mt = simulate.make_synthetic(jax.random.PRNGKey(1), J=1500)
-    res = fit(Xt, Y, D, PriorConfig(), CAVIConfig(max_iter=300))
-    Mh = np.asarray(res.M_hat)
-    assert np.corrcoef(Mh.ravel(), np.asarray(Mt).ravel())[0, 1] > 0.95
-    assert np.corrcoef(Mh.sum(1), np.asarray(Mt).sum(1))[0, 1] > 0.95
+def test_nuts_recovery():
+    """NUTS recovers M_true from synthetic data."""
+    Xt, Y, D, m, Mt = simulate.make_synthetic(jax.random.PRNGKey(3), J=400)
+    res = fit_nuts(Xt, Y, D, PriorConfig(),
+                   MCMCConfig(num_warmup=120, num_samples=120, num_chains=2))
+    Mt = np.asarray(Mt)
+    assert np.isfinite(res.samples).all()
+    assert res.num_divergences == 0
+    assert np.corrcoef(res.M_hat.ravel(), Mt.ravel())[0, 1] > 0.9            # recovers truth
+    assert np.corrcoef(res.M_hat.sum(1), Mt.sum(1))[0, 1] > 0.9             # recovers growth
 
 
 def test_decompose_identity():
@@ -42,39 +46,17 @@ def test_masking_invariance():
     assert np.isclose(float(ll1), float(ll2))
 
 
-def test_nuts_recovers_and_agrees_with_cavi():
-    """NUTS backend (marginal posterior) recovers M_true and matches CAVI's point estimate."""
-    from traffic import MCMCConfig, mcmc
-    Xt, Y, D, m, Mt = simulate.make_synthetic(jax.random.PRNGKey(3), J=400)
-    cav = fit(Xt, Y, D, PriorConfig(), CAVIConfig(max_iter=300))
-    res = mcmc.fit_nuts(Xt, Y, D, PriorConfig(),
-                        MCMCConfig(num_warmup=120, num_samples=120, num_chains=2))
-    Mt = np.asarray(Mt)
-    assert np.isfinite(res.samples).all()
-    assert res.num_divergences == 0
-    assert np.corrcoef(res.M_hat.ravel(), Mt.ravel())[0, 1] > 0.9            # recovers truth
-    assert np.corrcoef(res.M_hat.ravel(), np.asarray(cav.M_hat).ravel())[0, 1] > 0.95  # agrees w/ CAVI
-
-
 def test_save_load_roundtrip(tmp_path):
-    """io.save_fit/load_fit round-trips both backends; reload is numpy-only."""
-    from traffic import io, statespace
+    """io.save_fit/load_fit round-trips a NUTS fit; reload is numpy-only."""
+    from traffic import io
     from traffic.mcmc import MCMCResult
     ss = statespace.default()
-    Xt, Y, D, m, Mt = simulate.make_synthetic(jax.random.PRNGKey(4), J=300)
-
-    cav = fit(Xt, Y, D, PriorConfig(), CAVIConfig(max_iter=100))
-    sc = io.load_fit(io.save_fit(tmp_path / "cavi", cav, ss=ss))
-    assert sc.kind == "cavi"
-    assert np.allclose(sc.M_hat, np.asarray(cav.M_hat))
-    assert sc.draws(50).shape == (50, ss.L, ss.L)
-
     rng = np.random.default_rng(0)
-    samp = rng.gamma(2.0, size=(40, ss.L, ss.L)).astype(np.float32)   # stand-in NUTS draws
+    samp = rng.gamma(2.0, size=(40, ss.L, ss.L)).astype(np.float32)
     fake = MCMCResult(samples=samp, M_hat=samp.mean(0), M_median=np.median(samp, 0),
                       sd=samp.std(0), num_divergences=0, r_hat_max=1.01, ess_min=123.0, n_draws=40)
     sn = io.load_fit(io.save_fit(tmp_path / "nuts", fake, ss=ss, meta={"note": "test"}))
-    assert sn.kind == "nuts" and sn.samples.shape == (40, ss.L, ss.L)
+    assert sn.samples.shape == (40, ss.L, ss.L)
     assert sn.draws(20).shape == (20, ss.L, ss.L)
     assert sn.meta.get("note") == "test"
     assert np.allclose(sn.M_hat, fake.M_hat, atol=1e-5)

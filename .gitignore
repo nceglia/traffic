@@ -11,10 +11,14 @@ scripts/timepoint_cv.py
 scripts/stationarity.py
 scripts/precompute.py
 scripts/mcmc_check.py
+scripts/drainage_nuts.py
 scripts/workup/
 
 # saved model artifacts
 *.npz
+
+# prototype / scratch analysis (dataset-specific, local only)
+scratch/
 
 # --- Python ---
 __pycache__/
@@ -25,3 +29,4 @@ dist/
 .pytest_cache/
 .DS_Store
 .ipynb_checkpoints/
+.Rhistory

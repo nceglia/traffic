@@ -1,11 +1,9 @@
 # traffic
 
 Bayesian **Gamma–Poisson population-dynamics model** for clonal cell trafficking
-across tissue × phenotype states, in **JAX**, with two inference backends:
-
-- **conjugate CAVI** (`fit`) — closed-form, fast, for the point estimate `M̂`;
-- **gradient-based MCMC / NUTS** (`mcmc.fit_nuts`) — samples `M` directly from the
-  marginal posterior for calibrated uncertainty.
+across tissue × phenotype states, in **JAX + NumPyro**. Inference is gradient-based
+MCMC (NUTS): the per-source allocations marginalize exactly (Poisson superposition),
+leaving `M` as the only unknown, sampled directly.
 
 ```
 M_{zz'}   ~ Gamma(a_z, b_z)                  non-negative mean matrix (free row sums)
@@ -15,9 +13,7 @@ y_j(z')   ~ Poisson(d_{j,z'} * mu_j(z'))       over non-missing states
 
 `M_{zz'}` = expected destination-`z'` cells per source-`z` cell over one forward
 step; the row sum `g_z` is net growth, and `M = diag(g) T` splits growth from the
-row-stochastic transition matrix `T`. By Poisson superposition the per-source
-allocations marginalize, leaving `M` as the only unknown — both backends target
-the same posterior `p(M | data)`.
+row-stochastic transition matrix `T`.
 
 ## Install
 ```bash
@@ -33,9 +29,8 @@ import traffic as tm
 
 # simulate from the generative model, then recover M
 Xt, Y, D, mask, M_true = tm.simulate.make_synthetic(jax.random.PRNGKey(0), J=2000)
-res = tm.fit(Xt, Y, D)                 # conjugate CAVI  -> res.M_hat  (fast)
-mc  = tm.mcmc.fit_nuts(Xt, Y, D)       # NUTS -> calibrated posterior draws of M
-T, g = tm.readouts.decompose(res.M_hat)
+mc   = tm.fit_nuts(Xt, Y, D)            # NUTS -> posterior draws + mc.M_hat
+T, g = tm.readouts.decompose(mc.M_hat)
 ```
 
 ## Fit your own data
@@ -46,7 +41,7 @@ states. An AnnData loader builds them from per-cell obs columns
 ```python
 import os
 obs = tm.data.from_h5ad(os.environ["TRAFFIC_H5"], tm.statespace.default())
-res = tm.fit(obs.Xtilde, obs.Y, obs.D)
+mc  = tm.fit_nuts(obs.Xtilde, obs.Y, obs.D)
 ```
 
 ## Save / reload a fit  (e.g. GPU node → local)
@@ -65,8 +60,7 @@ T, g  = tm.readouts.decompose(fit.M_hat) # row-stochastic transitions + growth
 
 ## Modules
 `statespace` · `config` · `data` (obs → arrays) · `model` · `simulate` ·
-`inference` (CAVI) · `mcmc` (NUTS) · `posterior` (draws/CIs) · `io` (save/load) ·
-`readouts` · `dynamics`.
+`mcmc` (NUTS) · `posterior` (draws/CIs) · `io` (save/load) · `readouts` · `dynamics`.
 
 ## Scripts
 - `scripts/recovery_check.py` — synthetic recovery (proves model + inference).
