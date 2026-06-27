@@ -30,3 +30,17 @@ class MCMCConfig:
     chain_method: str = "vectorized"  # parallel chains via vmap on one device
     seed: int = 0
     progress_bar: bool = False
+
+
+@dataclass(frozen=True)
+class LikelihoodConfig:
+    """Observation likelihood + dispersion structure.
+
+    family = "poisson" (default) or "nb" (Negative-Binomial, var = mean + mean^2/r).
+    dispersion = "none" | "global" | "tissue" | "patient" (= tissue x patient).
+    Parameterized by overdispersion alpha = 1/r, so alpha -> 0 recovers Poisson.
+    """
+    family: str = "poisson"
+    dispersion: str = "none"
+    alpha_scale: float = 1.0     # HalfNormal / Normal scale on alpha (per-tissue level)
+    sigma_scale: float = 0.5     # patient mode: HalfNormal scale on the log-dispersion sd

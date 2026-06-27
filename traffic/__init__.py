@@ -4,13 +4,13 @@ T-cell trafficking across tissue and phenotype (JAX + NumPyro / NUTS).
 Executable form of gbm_trafficking/docs/model_methods.tex.
 """
 from . import model, simulate, statespace
-from .config import MCMCConfig, PriorConfig
+from .config import LikelihoodConfig, MCMCConfig, PriorConfig
 from .statespace import StateSpace
 from .statespace import default as default_statespace
 
 __all__ = [
     "StateSpace", "default_statespace",
-    "PriorConfig", "MCMCConfig",
+    "PriorConfig", "MCMCConfig", "LikelihoodConfig",
     "model", "simulate", "statespace",
 ]
 

@@ -60,3 +60,40 @@ def test_save_load_roundtrip(tmp_path):
     assert sn.draws(20).shape == (20, ss.L, ss.L)
     assert sn.meta.get("note") == "test"
     assert np.allclose(sn.M_hat, fake.M_hat, atol=1e-5)
+
+
+def test_nb_poisson_limit():
+    """NB2 at large finite concentration matches Poisson (the alpha->0 limit)."""
+    import numpyro.distributions as dist
+    y = jnp.array([0.0, 1.0, 3.0, 8.0])
+    mean = jnp.array([0.5, 2.0, 3.0, 5.0])
+    lp_nb = dist.NegativeBinomial2(mean, 1e3).log_prob(y)
+    lp_pois = dist.Poisson(mean).log_prob(y)
+    assert np.allclose(np.asarray(lp_nb), np.asarray(lp_pois), atol=1e-2)
+
+
+def test_nb_recovery_global():
+    """NUTS recovers M from NB-overdispersed synthetic data (global dispersion)."""
+    from traffic import LikelihoodConfig
+    Xt, Y, D, m, Mt = simulate.make_synthetic(jax.random.PRNGKey(5), J=500, r=2.0)
+    res = fit_nuts(Xt, Y, D, PriorConfig(),
+                   MCMCConfig(num_warmup=150, num_samples=150, num_chains=2),
+                   lik=LikelihoodConfig(family="nb", dispersion="global"))
+    assert res.r_hat_max < 1.1
+    assert np.corrcoef(res.M_hat.ravel(), np.asarray(Mt).ravel())[0, 1] > 0.85
+    assert res.dispersion is not None and "alpha" in res.dispersion["params"]
+
+
+def test_save_load_nb_dispersion(tmp_path):
+    """Dispersion samples round-trip through io for an NB fit."""
+    from traffic import io
+    from traffic.mcmc import MCMCResult
+    ss = statespace.default()
+    rng = np.random.default_rng(1)
+    samp = rng.gamma(2.0, size=(30, ss.L, ss.L)).astype(np.float32)
+    disp = {"mode": "tissue", "params": {"alpha_s": rng.gamma(1.0, size=(30, 3)).astype(np.float32)}}
+    res = MCMCResult(samples=samp, M_hat=samp.mean(0), M_median=np.median(samp, 0), sd=samp.std(0),
+                     num_divergences=0, r_hat_max=1.0, ess_min=100.0, n_draws=30, dispersion=disp)
+    sn = io.load_fit(io.save_fit(tmp_path / "nb", res, ss=ss))
+    assert sn.dispersion["mode"] == "tissue"
+    assert sn.dispersion["params"]["alpha_s"].shape == (30, 3)

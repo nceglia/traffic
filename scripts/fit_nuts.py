@@ -15,6 +15,8 @@ Env:
   TRAFFIC_SAMPLES    NUTS samples/chain  (default 1000)
   TRAFFIC_CHAINS     chains              (default 2)
   TRAFFIC_SUBSAMPLE  observations to use (default 0 = full data)
+  TRAFFIC_LIKELIHOOD poisson | nb                        (default poisson)
+  TRAFFIC_DISPERSION none | global | tissue | patient    (NB only; default none)
 """
 import os
 
@@ -23,7 +25,7 @@ import jax
 jax.config.update("jax_enable_x64", os.environ.get("TRAFFIC_X64", "0") != "0")
 import numpy as np
 
-from traffic import MCMCConfig, PriorConfig, data, io, mcmc, statespace
+from traffic import LikelihoodConfig, MCMCConfig, PriorConfig, data, io, mcmc, statespace
 
 
 def main():
@@ -38,10 +40,18 @@ def main():
     rho = data.phenotype_dist_by_tissue(obs_df, ss)
 
     X, Y, D = obs.Xtilde, obs.Y, obs.D
+    patient = np.asarray(obs.patient)
     sub = int(os.environ.get("TRAFFIC_SUBSAMPLE", "0"))
     if sub and sub < X.shape[0]:
         idx = np.sort(np.random.default_rng(0).choice(X.shape[0], sub, replace=False))
-        X, Y, D = X[idx], Y[idx], D[idx]
+        X, Y, D, patient = X[idx], Y[idx], D[idx], patient[idx]
+
+    lik = LikelihoodConfig(family=os.environ.get("TRAFFIC_LIKELIHOOD", "poisson"),
+                           dispersion=os.environ.get("TRAFFIC_DISPERSION", "none"))
+    patient_idx = None
+    if lik.dispersion == "patient":
+        pmap = {p: i for i, p in enumerate(sorted(set(patient.tolist())))}
+        patient_idx = np.array([pmap[p] for p in patient])
 
     cfg = MCMCConfig(
         num_warmup=int(os.environ.get("TRAFFIC_WARMUP", "1000")),
@@ -49,9 +59,10 @@ def main():
         num_chains=int(os.environ.get("TRAFFIC_CHAINS", "2")),
     )
     print(f"backend={jax.default_backend()}  J={X.shape[0]}  "
+          f"likelihood={lik.family}/{lik.dispersion}  "
           f"warmup={cfg.num_warmup} samples={cfg.num_samples} chains={cfg.num_chains}")
 
-    res = mcmc.fit_nuts(X, Y, D, PriorConfig(), cfg)
+    res = mcmc.fit_nuts(X, Y, D, PriorConfig(), cfg, lik=lik, patient_idx=patient_idx)
     print(f"divergences={res.num_divergences}  r_hat_max={res.r_hat_max:.3f}  "
           f"ess_min={res.ess_min:.0f}")
 
