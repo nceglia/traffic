@@ -17,6 +17,9 @@ scripts/workup/
 # saved model artifacts
 *.npz
 
+# local GPU-node environment bootstrap (machine/dataset-specific)
+env_gpu.sh
+
 # prototype / scratch analysis (dataset-specific, local only)
 scratch/
 
