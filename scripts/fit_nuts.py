@@ -22,7 +22,10 @@ import os
 
 import jax
 
-jax.config.update("jax_enable_x64", os.environ.get("TRAFFIC_X64", "0") != "0")
+# NB needs float64 (its gammaln/digamma terms are f32-unstable at large counts),
+# so default x64 on when fitting NB; Poisson defaults to f32 (faster on GPU).
+_NB = os.environ.get("TRAFFIC_LIKELIHOOD", "poisson") == "nb"
+jax.config.update("jax_enable_x64", os.environ.get("TRAFFIC_X64", "1" if _NB else "0") != "0")
 import numpy as np
 
 from traffic import LikelihoodConfig, MCMCConfig, PriorConfig, data, io, mcmc, statespace

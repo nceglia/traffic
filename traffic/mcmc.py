@@ -8,8 +8,13 @@ automatic log-transform of the constrained supports.
 
 Likelihood (see config.LikelihoodConfig):
     family = "poisson":  y ~ Poisson(d * x~ M)
-    family = "nb":       y ~ NegBinomial2(mean = d * x~ M,  concentration r = 1/alpha)
+    family = "nb":       y ~ NegBinomial2(mean = d * x~ M,  concentration r = exp(log_r))
                          dispersion = none | global | tissue | patient(=tissue x patient)
+
+Dispersion uses a log-concentration parameterization (log_r ~ Normal): smooth for
+HMC, a soft Poisson limit at log_r -> +inf, and no 1/alpha reciprocal or alpha->0
+funnel. NB requires float64 (the gammaln/digamma terms with large counts are
+f32-unstable).
 """
 from __future__ import annotations
 
@@ -21,7 +26,7 @@ import numpy as np
 
 from .config import LikelihoodConfig, MCMCConfig, PriorConfig
 
-_DISP_SITES = {"global": ["alpha"], "tissue": ["alpha_s"], "patient": ["mu_s", "sigma", "eps"]}
+_DISP_SITES = {"global": ["log_r"], "tissue": ["log_r_s"], "patient": ["mu_s", "sigma", "eps"]}
 
 
 def numpyro_model(Xtilde, Y, D, a0, b0, family, dispersion, alpha_scale, sigma_scale,
@@ -44,20 +49,21 @@ def numpyro_model(Xtilde, Y, D, a0, b0, family, dispersion, alpha_scale, sigma_s
         numpyro.sample("Y", dist.Poisson(safe_mean).mask(observed), obs=Y)
         return
 
-    # Negative-Binomial: concentration r = 1/alpha (alpha -> 0 recovers Poisson)
+    # Negative-Binomial: concentration r = exp(log_r), log_r ~ Normal (soft Poisson
+    # limit at log_r -> +inf; no reciprocal / alpha->0 funnel).
     if dispersion == "global":
-        a_col = numpyro.sample("alpha", dist.HalfNormal(alpha_scale))
+        log_r = numpyro.sample("log_r", dist.Normal(0.0, alpha_scale))
     elif dispersion == "tissue":
-        alpha_s = numpyro.sample("alpha_s", dist.HalfNormal(alpha_scale).expand([3]).to_event(1))
-        a_col = alpha_s[col_tissue]                # [L]
+        log_r_s = numpyro.sample("log_r_s", dist.Normal(0.0, alpha_scale).expand([3]).to_event(1))
+        log_r = log_r_s[col_tissue]                # [L]
     elif dispersion == "patient":                  # tissue x patient, non-centered, pooled
         mu_s = numpyro.sample("mu_s", dist.Normal(0.0, alpha_scale).expand([3]).to_event(1))
         sigma = numpyro.sample("sigma", dist.HalfNormal(sigma_scale))
         eps = numpyro.sample("eps", dist.Normal(0.0, 1.0).expand([n_patient, 3]).to_event(2))
-        a_col = jnp.exp((mu_s[None, :] + sigma * eps)[patient_idx][:, col_tissue])   # [J, L]
+        log_r = (mu_s[None, :] + sigma * eps)[patient_idx][:, col_tissue]   # [J, L]
     else:
         raise ValueError(f"unknown dispersion {dispersion!r}")
-    r = 1.0 / (a_col + 1e-6)
+    r = jnp.exp(log_r)
     numpyro.sample("Y", dist.NegativeBinomial2(safe_mean, jnp.broadcast_to(r, mean.shape)).mask(observed),
                    obs=Y)
 
@@ -95,6 +101,11 @@ def fit_nuts(Xtilde, Y, D, prior: PriorConfig = PriorConfig(), cfg: MCMCConfig =
     from numpyro.diagnostics import summary
     from numpyro.infer import MCMC, NUTS
 
+    if lik.family == "nb" and not jax.config.read("jax_enable_x64"):
+        import warnings
+        warnings.warn("NB likelihood is numerically unstable in float32 (the gammaln/"
+                      "digamma terms with large counts); enable x64 via "
+                      "jax.config.update('jax_enable_x64', True).", RuntimeWarning)
     dtype = jnp.float64 if jax.config.read("jax_enable_x64") else jnp.float32
     Xt = jnp.asarray(Xtilde, dtype)
     Yj = jnp.asarray(Y, dtype)

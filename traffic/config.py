@@ -38,9 +38,10 @@ class LikelihoodConfig:
 
     family = "poisson" (default) or "nb" (Negative-Binomial, var = mean + mean^2/r).
     dispersion = "none" | "global" | "tissue" | "patient" (= tissue x patient).
-    Parameterized by overdispersion alpha = 1/r, so alpha -> 0 recovers Poisson.
+    Log-concentration parameterization: log r ~ Normal(0, alpha_scale); r = exp(log r);
+    large r recovers Poisson. NB requires float64.
     """
     family: str = "poisson"
     dispersion: str = "none"
-    alpha_scale: float = 1.0     # HalfNormal / Normal scale on alpha (per-tissue level)
-    sigma_scale: float = 0.5     # patient mode: HalfNormal scale on the log-dispersion sd
+    alpha_scale: float = 1.0     # Normal-prior scale on log r (dispersion level)
+    sigma_scale: float = 0.5     # patient mode: HalfNormal scale on the tissue x patient log-r sd

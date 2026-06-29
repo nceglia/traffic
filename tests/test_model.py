@@ -81,7 +81,7 @@ def test_nb_recovery_global():
                    lik=LikelihoodConfig(family="nb", dispersion="global"))
     assert res.r_hat_max < 1.1
     assert np.corrcoef(res.M_hat.ravel(), np.asarray(Mt).ravel())[0, 1] > 0.85
-    assert res.dispersion is not None and "alpha" in res.dispersion["params"]
+    assert res.dispersion is not None and "log_r" in res.dispersion["params"]
 
 
 def test_save_load_nb_dispersion(tmp_path):
