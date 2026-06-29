@@ -14,8 +14,9 @@ scripts/mcmc_check.py
 scripts/drainage_nuts.py
 scripts/workup/
 
-# saved model artifacts
+# saved model artifacts + holdout fits and their scoring read-outs (regenerated)
 *.npz
+holdout_fits/
 
 # local GPU-node environment bootstrap (machine/dataset-specific)
 env_gpu.sh
