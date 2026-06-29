@@ -1,11 +1,13 @@
-"""Joint tissue-phenotype state space  Z = S x K,  L = S*K = 33.
+"""Joint tissue-phenotype state space  Z = S x K,  L = S*K = 39.
 
 State-index convention:
     z = tissue_index * K + phenotype_index
 
-The default orderings below are 3 tissues x 11 T-cell phenotypes ("TP" is the
-tumor tissue). Pass your own ``tissues``/``phenotypes`` to ``StateSpace`` to use
-a different state space.
+The default orderings below are 3 tissues x 13 T-cell phenotypes ("TP" is the
+tumor tissue). The CD4 naive/memory compartment is resolved into three states
+(CD4_Naive, CD4_Activated, CD4_Quiescent_Exhausted) along the orthogonal naive,
+activation, and exhaustion axes. Pass your own ``tissues``/``phenotypes`` to
+``StateSpace`` to use a different state space.
 """
 from __future__ import annotations
 
@@ -22,7 +24,9 @@ PHENOTYPES = (
     "CD8_Quiescent_Memory",
     "CD8_Quiescent_Naive",
     "CD8_Quiescent_TEXprog",
-    "CD4_Naive_Memory",
+    "CD4_Naive",
+    "CD4_Activated",
+    "CD4_Quiescent_Exhausted",
     "CD4_Exhausted",
     "CD4_Treg",
     "CD4_Th",
