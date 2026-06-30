@@ -15,7 +15,7 @@ Migration + switching are the exact KL chain-rule split of the destination
 composition divergence  D(c_obs || c_pred) = D(tissue marginal) + E[D(pheno|tissue)]
 (here computed with the bounded Jensen-Shannon analogue per piece); expansion is
 the orthogonal magnitude axis. Each axis is scored against two nulls --
-persistence (M = identity: "cells stay put") and climatology (population mean
+static (M = identity: "cells stay put") and pooled (population-average mean
 composition) -- so "skill" = how far the model beats the relevant null.
 
 Every axis is then stratified by clone abundance, patient, source tissue, and
@@ -123,8 +123,8 @@ def stratum_summary(key, order, model_err, null_err, base_mask):
         mm = float(np.median(model_err[sel])) if n else np.nan
         seln = base_mask & (key == lab) & np.isfinite(null_err)
         mn = float(np.median(null_err[seln])) if seln.sum() else np.nan
-        # skill undefined when the null is ~perfect (mn≈0, e.g. persistence on the
-        # static no-change majority) -- guard so it doesn't blow up.
+        # skill undefined when the null is ~perfect (mn≈0, e.g. the static null on
+        # the no-change majority) -- guard so it doesn't blow up.
         skill = (1 - mm / mn) if (np.isfinite(mm) and np.isfinite(mn) and mn > 1e-4) else np.nan
         rows.append({"stratum": str(lab), "n": n, "model": mm, "null": mn, "skill": skill})
     return rows
@@ -150,17 +150,17 @@ def main():
     J = Xt.shape[0]
     print(f"fit={fit_path}  J={J}  L={L}  tissues={ss.tissues}")
 
-    # predicted destination means: model (M_hat), persistence (M=I), climatology (pi)
+    # predicted destination means: model (M_hat), static null (M=I), pooled null (pi)
     obsv = D > 0
     Yt = np.where(obsv, Y, 0.0)
-    pi = Yt.sum(0); pi = pi / max(pi.sum(), 1e-12)        # population destination comp [L]
+    pi = Yt.sum(0); pi = pi / max(pi.sum(), 1e-12)        # pooled population destination comp [L]
     mean_model = np.where(obsv, D * (Xt @ fit.M_hat), 0.0)
-    mean_persist = np.where(obsv, D * Xt, 0.0)
-    mean_clim = np.where(obsv, D * (Xt.sum(1, keepdims=True) * pi[None, :]), 0.0)
+    mean_static = np.where(obsv, D * Xt, 0.0)
+    mean_pooled = np.where(obsv, D * (Xt.sum(1, keepdims=True) * pi[None, :]), 0.0)
 
     m = decompose_prediction(Xt, Y, D, mean_model, ss)
-    p = decompose_prediction(Xt, Y, D, mean_persist, ss)
-    c = decompose_prediction(Xt, Y, D, mean_clim, ss)
+    p = decompose_prediction(Xt, Y, D, mean_static, ss)    # static (no-change) null
+    c = decompose_prediction(Xt, Y, D, mean_pooled, ss)    # pooled population-average null
 
     # strata
     n_src = obs.n_src.astype(int)
@@ -185,7 +185,7 @@ def main():
     # --- model-independent "did the behavior actually occur?" signals ---------- #
     # Measured from source vs observed destination composition. We score each axis
     # on the subset where the behavior is present, so skill reflects events of
-    # interest, not the static no-change majority (which persistence predicts for
+    # interest, not the no-change majority (which the static null predicts for
     # free). Thresholds are deliberately mild (JS>0.05; >2x size change).
     src_tis = Xr_tis / np.maximum(Xr_tis.sum(1, keepdims=True), 1e-12)        # [J,S]
     obs_tis = Yt.reshape(J, S, K).sum(2)
@@ -215,9 +215,9 @@ def main():
     with open(summ_path, "w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["axis", "stratum_kind", "stratum", "n_survivors", "n_movers",
-                    "model_err", "persistence_err", "climatology_err",
-                    "skill_vs_persistence_all", "skill_vs_climatology_all",
-                    "skill_vs_persistence_movers", "skill_vs_climatology_movers"])
+                    "model_err", "static_err", "pooled_err",
+                    "skill_vs_static_all", "skill_vs_pooled_all",
+                    "skill_vs_static_movers", "skill_vs_pooled_movers"])
         for ax_name, (em, ep, ec) in axes.items():
             mv = mover[ax_name]
             for kind, (key, order) in strata.items():
@@ -246,7 +246,7 @@ def main():
                    boxprops=dict(facecolor="#4c72b0", alpha=0.6))
         med_p = [np.nanmedian(ep[base & (key == lab) & np.isfinite(ep)])
                  if (base & (key == lab)).any() else np.nan for lab in order]
-        ax.plot(np.arange(len(order)), med_p, "rD", ms=6, label="persistence median")
+        ax.plot(np.arange(len(order)), med_p, "rD", ms=6, label="static (no change) median")
         ax.set_xticks(np.arange(len(order)))
         ax.set_xticklabels([f"{o}\n(n={int((base&(key==o)).sum())})" for o in order],
                            fontsize=7)
@@ -257,8 +257,8 @@ def main():
                               if (base & (key == q)).any() else np.nan)
         xx = np.arange(len(order))
         ax.bar(xx - 0.25, [med(em, q) for q in order], 0.25, label="model", color="#4c72b0")
-        ax.bar(xx, [med(ep, q) for q in order], 0.25, label="persistence", color="#c44e52", alpha=0.8)
-        ax.bar(xx + 0.25, [med(ec, q) for q in order], 0.25, label="climatology", color="#dd8452", alpha=0.8)
+        ax.bar(xx, [med(ep, q) for q in order], 0.25, label="static", color="#c44e52", alpha=0.8)
+        ax.bar(xx + 0.25, [med(ec, q) for q in order], 0.25, label="pooled population-average", color="#dd8452", alpha=0.8)
         ax.set_xticks(xx); ax.set_xticklabels([f"{q}\n(n={int((base&(key==q)).sum())})" for q in order], fontsize=7)
         ax.set_ylabel(ylabel); ax.set_title(title); ax.legend(fontsize=7)
 
@@ -316,7 +316,7 @@ def main():
     by_group_bars(ax[1, 0], src_tissue, tis_order, m["switching"], p["switching"], c["switching"],
                   mover["switching"], "median phenotype JS", "C. Switching error by source tissue (switchers)")
     im = skill_heat(ax[1, 1], abin, ABUND_LABELS, m["switching"], p["switching"],
-                    "D. Switching skill vs persistence, SWITCHERS only\n(+ = model better, - = worse)",
+                    "D. Switching skill vs static, SWITCHERS only\n(+ = model better, - = worse)",
                     mover["switching"])
     fig.colorbar(im, ax=ax[1, 1], fraction=0.046)
     fig.suptitle("Phenotypic switching (within-tissue phenotype conversion) -- global fit", y=0.995)
@@ -340,7 +340,7 @@ def main():
     by_group_bars(ax[1, 0], patient, pat_order, m["migration"], p["migration"], c["migration"],
                   mover["migration"], "median tissue JS", "C. Migration error by patient (migrators)")
     im = skill_heat(ax[1, 1], abin, ABUND_LABELS, m["migration"], p["migration"],
-                    "D. Migration skill vs persistence, MIGRATORS only\n(+ = model better, - = worse)",
+                    "D. Migration skill vs static, MIGRATORS only\n(+ = model better, - = worse)",
                     mover["migration"])
     fig.colorbar(im, ax=ax[1, 1], fraction=0.046)
     fig.suptitle("Migration (cross-tissue redistribution) -- global fit one-step prediction", y=0.995)
@@ -349,7 +349,7 @@ def main():
 
     # ===================== FIGURE 4: PREDICTABILITY SUMMARY =================== #
     # master heatmap: rows = strata (abundance bins + patients), cols = 3 axes,
-    # color = skill vs persistence; a trailing column shows recapture rate.
+    # color = skill vs static null; a trailing column shows recapture rate.
     row_keys = [("abund", l) for l in ABUND_LABELS] + [("pat", q) for q in pat_order]
     row_labels = [f"size {l}" for l in ABUND_LABELS] + [f"pt {q}" for q in pat_order]
     axis_order = ["expansion", "switching", "migration"]
@@ -375,8 +375,8 @@ def main():
                 a.text(ci, ri, f"{v:+.2f}\nn={n_grid[ri, ci]}", ha="center", va="center",
                        fontsize=6.5, color="k")
     a.axhline(len(ABUND_LABELS) - 0.5, color="k", lw=1.5)
-    a.set_title("Predictability skill vs persistence, conditional on movers\n(+ = model adds value where the behavior occurs)")
-    fig.colorbar(im, ax=a, fraction=0.046, label="skill = 1 - err_model/err_persist")
+    a.set_title("Predictability skill vs static (no change), conditional on movers\n(+ = model adds value where the behavior occurs)")
+    fig.colorbar(im, ax=a, fraction=0.046, label="skill = 1 - err_model/err_static")
     rax = axx[1]
     rec = [recap[l] for l in ABUND_LABELS] + [np.nan] * len(pat_order)
     yy = np.arange(len(row_labels))
@@ -399,10 +399,10 @@ def main():
             return np.median(arr[s]) if s.any() else np.nan
         sk_all = 1 - med(em, surv) / med(ep, surv) if med(ep, surv) > 1e-4 else np.nan
         sk_mv = 1 - med(em, mv) / med(ep, mv) if med(ep, mv) > 1e-4 else np.nan
-        print(f"  {ax_name:10} ALL: model={med(em, surv):.3f} persist={med(ep, surv):.3f} "
-              f"clim={med(ec, surv):.3f} skill_vs_persist={sk_all:+.2f} (n={int((surv&np.isfinite(em)).sum())})")
-        print(f"  {'':10} MOVERS: model={med(em, mv):.3f} persist={med(ep, mv):.3f} "
-              f"clim={med(ec, mv):.3f} skill_vs_persist={sk_mv:+.2f} (n_movers={int(mv.sum())})")
+        print(f"  {ax_name:10} ALL: model={med(em, surv):.3f} static={med(ep, surv):.3f} "
+              f"pooled={med(ec, surv):.3f} skill_vs_static={sk_all:+.2f} (n={int((surv&np.isfinite(em)).sum())})")
+        print(f"  {'':10} MOVERS: model={med(em, mv):.3f} static={med(ep, mv):.3f} "
+              f"pooled={med(ec, mv):.3f} skill_vs_static={sk_mv:+.2f} (n_movers={int(mv.sum())})")
     print(f"  overall recapture rate = {surv.mean():.3f}")
 
 
