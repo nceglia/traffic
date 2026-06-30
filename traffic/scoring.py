@@ -329,10 +329,10 @@ def compare_fits(npz_withheld, npz_full, obs, *, eval_mask=None, n_draws=400, se
 # 2019; forecast skill scores). We score two reference predictors and a noise
 # ceiling, then report skill = how far the model moves from a null toward the
 # best attainable:
-#   persistence  M = identity: the depth-normalized source density is carried
+#   static  M = identity: the depth-normalized source density is carried
 #                forward unchanged (no trafficking, no growth) -- the "no change"
 #                reference.
-#   climatology  clone-agnostic: every clone predicted with the pooled population
+#   pooled  clone-agnostic: every clone predicted with the pooled population
 #                destination composition, scaled to its source mass -- the
 #                "marginal average" reference.
 #   saturated    per-clone Poisson MLE (mean = observed): the achievable elpd
@@ -340,7 +340,7 @@ def compare_fits(npz_withheld, npz_full, obs, *, eval_mask=None, n_draws=400, se
 # Feasibility is also assessed at the aggregate-marginal level (the scientifically
 # relevant scale) vs a replicate noise floor (JS between two random halves).
 # --------------------------------------------------------------------------- #
-def climatology_pi(obs, mask=None):
+def pooled_pi(obs, mask=None):
     """Pooled destination-state composition over `mask` (default all rows), [L]."""
     Y = obs.Y if mask is None else obs.Y[mask]
     s = Y.sum(0)
@@ -350,30 +350,36 @@ def climatology_pi(obs, mask=None):
 def baseline_mean(kind, Xt, D, pi=None, *, floor=1e-6):
     """Deterministic predicted-mean [n,L] for a null predictor (eps-floored).
 
-    persistence  mean = D x~        (M = identity)
-    climatology  mean = D * (sum_z x~)(z) * pi    (population destination shape)
+    static  mean = D x~                      (M = identity; source carried forward unchanged)
+    pooled  mean = D * (sum_z x~)(z) * pi    (pooled population-average destination shape)
     The floor keeps a null from being -inf-penalized at a state it assigns zero.
     """
     obsv = D > 0
-    if kind == "persistence":
+    if kind == "static":
         nu = Xt
-    elif kind == "climatology":
+    elif kind == "pooled":
         if pi is None:
-            raise ValueError("climatology needs pi")
+            raise ValueError("pooled needs pi")
         nu = Xt.sum(1, keepdims=True) * pi[None, :]
     else:
         raise ValueError(f"unknown baseline {kind!r}")
     return np.where(obsv, D * nu + floor, 0.0)
 
 
-def _saturated_elpd(Y, D):
-    """Per-clone Poisson saturated log-likelihood (mean = observed): the ceiling."""
-    from scipy.special import gammaln
+def _saturated_elpd(Y, D, r):
+    """Per-clone NB saturated log-likelihood (mean = observed, concentration r): the ceiling.
+
+    The best a NegBinomial(., r) model can score -- perfect mean aim under the SAME
+    overdispersion the data carry, scored with the same r as the model and the nulls.
+    (The Poisson saturated ceiling assumes only Poisson noise, so it is unreachable by an
+    NB model and understates skill.) `r` broadcasts to Y's shape; y=0 states score 0.
+    """
     obsv = D > 0
     Yt = np.where(obsv, Y, 0.0)
+    r = np.broadcast_to(np.asarray(r, float), Yt.shape)
     with np.errstate(divide="ignore", invalid="ignore"):
-        term = np.where(Yt > 0, Yt * np.log(np.maximum(Yt, _EPS)) - Yt - gammaln(Yt + 1.0), 0.0)
-    return np.where(obsv, term, 0.0).sum(1)
+        lp = nbinom.logpmf(Yt, r, r / (r + Yt))          # log NB2(y; mean=y, r); = NB ceiling
+    return np.where((Yt > 0) & obsv, lp, 0.0).sum(1)
 
 
 def score_baseline(name, Y, D, mean, r, *, extra=None):
@@ -400,13 +406,13 @@ def score_baseline(name, Y, D, mean, r, *, extra=None):
                   weight=N_obs.astype(float), meta=extra or {})
 
 
-def skill(model, persistence, climatology, oracle_elpd):
+def skill(model, static, pooled, oracle_elpd):
     """Skill of the model relative to each null (>0 => beats the null).
 
     skill_shape = 1 - JS_model / JS_null            (1 = perfect, 0 = no better)
     skill_elpd  = (elpd_model - elpd_null) / (elpd_oracle - elpd_null)
     """
-    m, p, c = model.summary(), persistence.summary(), climatology.summary()
+    m, p, c = model.summary(), static.summary(), pooled.summary()
     em, ep, ec = m["elpd_mean"], p["elpd_mean"], c["elpd_mean"]
     jm, jp, jc = m["jsd_wmean"], p["jsd_wmean"], c["jsd_wmean"]
 
@@ -419,11 +425,11 @@ def skill(model, persistence, climatology, oracle_elpd):
 
     return {
         "name": m["name"],
-        "skill_shape_vs_persistence": _ss(jp), "skill_shape_vs_climatology": _ss(jc),
-        "skill_elpd_vs_persistence": _se(ep), "skill_elpd_vs_climatology": _se(ec),
-        "d_elpd_persistence": float(em - ep), "d_elpd_climatology": float(em - ec),
-        "jsd_model": jm, "jsd_persistence": jp, "jsd_climatology": jc,
-        "elpd_model": em, "elpd_persistence": ep, "elpd_climatology": ec,
+        "skill_shape_vs_static": _ss(jp), "skill_shape_vs_pooled": _ss(jc),
+        "skill_elpd_vs_static": _se(ep), "skill_elpd_vs_pooled": _se(ec),
+        "d_elpd_static": float(em - ep), "d_elpd_pooled": float(em - ec),
+        "jsd_model": jm, "jsd_static": jp, "jsd_pooled": jc,
+        "elpd_model": em, "elpd_static": ep, "elpd_pooled": ec,
         "elpd_oracle": float(oracle_elpd),
     }
 
@@ -495,8 +501,8 @@ def score_aggregate(name, Xt, Y, D, M_hat, pi, *, M_draws=None, r_draws=None,
         return a / max(a.sum(), _EPS), a.sum()
 
     cm, tm = _agg(np.where(obsv, D * (Xt @ M_hat), 0.0))
-    cp, tp = _agg(baseline_mean("persistence", Xt, D))
-    cc, tc = _agg(baseline_mean("climatology", Xt, D, pi))
+    cp, tp = _agg(baseline_mean("static", Xt, D))
+    cc, tc = _agg(baseline_mean("pooled", Xt, D, pi))
 
     # split-half floor: JS between two random halves of the observed clones
     rng = np.random.default_rng(seed)
@@ -508,10 +514,10 @@ def score_aggregate(name, Xt, Y, D, M_hat, pi, *, M_draws=None, r_draws=None,
     obs_tot = obs_agg.sum()
     out = {
         "name": name,
-        "js_model": _js(obs_comp, cm), "js_persistence": _js(obs_comp, cp),
-        "js_climatology": _js(obs_comp, cc), "js_noise_floor": float(js_floor),
+        "js_model": _js(obs_comp, cm), "js_static": _js(obs_comp, cp),
+        "js_pooled": _js(obs_comp, cc), "js_noise_floor": float(js_floor),
         "total_ratio_model": float(tm / max(obs_tot, _EPS)),
-        "total_ratio_persistence": float(tp / max(obs_tot, _EPS)),
+        "total_ratio_static": float(tp / max(obs_tot, _EPS)),
     }
     if M_draws is not None and r_draws is not None and len(M_draws):
         out.update(_ppc_aggregate_floor(Xt, D, M_draws, r_draws, obs_comp,
@@ -540,20 +546,26 @@ def evaluate_holdout(fit_path, obs, *, n_draws=400, seed=0):
     model = score_slice(name, "predict", Xt, Y, D, r, M,
                         extra={"n_src": obs.n_src[mask], "patient": obs.patient[mask],
                                "src_tp": obs.src_tp[mask].astype(int), **fit.meta})
-    pi = climatology_pi(obs, ~mask)                       # population marginal, non-test
-    persist = score_baseline(name + "/persist", Y, D, baseline_mean("persistence", Xt, D), r_bar)
-    clim = score_baseline(name + "/clim", Y, D, baseline_mean("climatology", Xt, D, pi), r_bar)
-    sk = skill(model, persist, clim, float(_saturated_elpd(Y, D).mean()))
+    pi = pooled_pi(obs, ~mask)                       # population marginal, non-test
+    static = score_baseline(name + "/static", Y, D, baseline_mean("static", Xt, D), r_bar)
+    pooled = score_baseline(name + "/pooled", Y, D, baseline_mean("pooled", Xt, D, pi), r_bar)
+    sk = skill(model, static, pooled, float(_saturated_elpd(Y, D, r_bar).mean()))
     agg = score_aggregate(name, Xt, Y, D, fit.M_hat, pi, M_draws=M, r_draws=r, seed=seed)
-    return {"model": model, "persistence": persist, "climatology": clim,
+    return {"model": model, "static": static, "pooled": pooled,
             "skill": sk, "aggregate": agg}
 
 
 # --------------------------------------------------------------------------- #
 # figures
 # --------------------------------------------------------------------------- #
-def figure_predictive(scores, path, *, title=None):
-    """4-panel predictive read-out across holdouts. `scores`: list[Scores]."""
+def figure_predictive(scores, path, *, title=None, skills=None):
+    """4-panel predictive read-out across holdouts. `scores`: list[Scores].
+
+    `skills` (optional): {name -> skill dict from `skill()`}. When provided, panel C
+    shows the joint-score *skill toward the oracle* -- (elpd_model - null)/(elpd_oracle
+    - null) -- instead of the raw elpd, since the raw log-density is always negative
+    (even the oracle is) and is uninterpretable without the baseline/oracle reference.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -588,14 +600,29 @@ def figure_predictive(scores, path, *, title=None):
     b.set_title("B. Shape: surviving-clone composition divergence (lower=better)")
     b.tick_params(axis="x", rotation=45, labelsize=8)
 
-    # C) joint elpd per holdout (mean +/- se), and coverage annotation
+    # C) joint-score skill toward the oracle (vs nulls); raw elpd is always negative
+    #    (so is the oracle), so without skills it is uninterpretable.
     c = ax[1, 0]
-    means = [s.elpd.mean() for s in sc]
-    ses = [s.elpd.std() / np.sqrt(s.n) for s in sc]
-    c.bar(range(len(sc)), means, yerr=ses, color=[colors[n] for n in names], alpha=0.7)
-    c.set_xticks(range(len(sc))); c.set_xticklabels(names, rotation=45, ha="right", fontsize=8)
-    c.set_ylabel("mean held-out elpd per clone")
-    c.set_title("C. Joint log score (higher=better)")
+    have_skill = bool(skills) and all(skills.get(s.name) for s in sc)
+    if have_skill:
+        xs = np.arange(len(sc)); wbar = 0.4
+        sp = [skills[s.name]["skill_elpd_vs_static"] for s in sc]
+        scl = [skills[s.name]["skill_elpd_vs_pooled"] for s in sc]
+        c.bar(xs - wbar / 2, sp, wbar, color="#3b6fb0", alpha=0.85, label="vs static (no change)")
+        c.bar(xs + wbar / 2, scl, wbar, color="#e8820c", alpha=0.85, label="vs pooled pop-avg")
+        c.axhline(0, color="k", lw=0.8)
+        c.axhline(1, color="grey", ls=":", lw=1, label="oracle (perfect)")
+        c.set_xticks(xs); c.set_xticklabels(names, rotation=45, ha="right", fontsize=8)
+        c.set_ylabel("elpd skill  (elpd_model - null)/(elpd_oracle - null)")
+        c.set_title("C. Joint-score skill toward oracle  (>0 beats null, 1 = oracle)")
+        c.legend(fontsize=7)
+    else:
+        means = [s.elpd.mean() for s in sc]
+        ses = [s.elpd.std() / np.sqrt(s.n) for s in sc]
+        c.bar(range(len(sc)), means, yerr=ses, color=[colors[n] for n in names], alpha=0.7)
+        c.set_xticks(range(len(sc))); c.set_xticklabels(names, rotation=45, ha="right", fontsize=8)
+        c.set_ylabel("mean held-out elpd per clone")
+        c.set_title("C. Joint log score (raw elpd; always <0 -- pass skills= for skill view)")
 
     # D) summary: shape accuracy vs magnitude calibration, one point per holdout
     d = ax[1, 1]
@@ -671,7 +698,7 @@ def figure_influence(inf, ss, path, *, title=None):
 def figure_feasibility(results, path, *, title=None):
     """4-panel feasibility read-out: model vs null baselines, per-clone & aggregate.
 
-    `results`: list of dicts from evaluate_holdout (model/persistence/climatology/
+    `results`: list of dicts from evaluate_holdout (model/static/pooled/
     skill/aggregate). The headline is whether the model beats both nulls and
     approaches the noise floor at the aggregate-marginal scale.
     """
@@ -684,25 +711,25 @@ def figure_feasibility(results, path, *, title=None):
     x = np.arange(len(res))
     fig, ax = plt.subplots(2, 2, figsize=(14, 11))
 
-    # A) per-clone shape: model vs persistence vs climatology (weighted JS, lower=better)
+    # A) per-clone shape: model vs static vs pooled (weighted JS, lower=better)
     a = ax[0, 0]
     jm = [r["skill"]["jsd_model"] for r in res]
-    jp = [r["skill"]["jsd_persistence"] for r in res]
-    jc = [r["skill"]["jsd_climatology"] for r in res]
+    jp = [r["skill"]["jsd_static"] for r in res]
+    jc = [r["skill"]["jsd_pooled"] for r in res]
     a.bar(x - 0.25, jm, 0.25, label="model", color="#4c72b0")
-    a.bar(x, jp, 0.25, label="persistence", color="#c44e52", alpha=0.8)
-    a.bar(x + 0.25, jc, 0.25, label="climatology", color="#dd8452", alpha=0.8)
+    a.bar(x, jp, 0.25, label="static", color="#c44e52", alpha=0.8)
+    a.bar(x + 0.25, jc, 0.25, label="pooled population-average", color="#dd8452", alpha=0.8)
     a.set_xticks(x); a.set_xticklabels(names, rotation=45, ha="right", fontsize=8)
     a.set_ylabel("weighted JS (lower=better)")
     a.set_title("A. Per-clone shape: model vs nulls")
     a.legend(fontsize=8)
 
-    # B) per-clone skill (>0 => beats null); shape & elpd vs persistence
+    # B) per-clone skill (>0 => beats null); shape & elpd vs static
     b = ax[0, 1]
-    ss_p = [r["skill"]["skill_shape_vs_persistence"] for r in res]
-    ss_c = [r["skill"]["skill_shape_vs_climatology"] for r in res]
-    b.bar(x - 0.2, ss_p, 0.4, label="shape skill vs persistence", color="#55a868")
-    b.bar(x + 0.2, ss_c, 0.4, label="shape skill vs climatology", color="#8172b3", alpha=0.85)
+    ss_p = [r["skill"]["skill_shape_vs_static"] for r in res]
+    ss_c = [r["skill"]["skill_shape_vs_pooled"] for r in res]
+    b.bar(x - 0.2, ss_p, 0.4, label="shape skill vs static", color="#55a868")
+    b.bar(x + 0.2, ss_c, 0.4, label="shape skill vs pooled pop-avg", color="#8172b3", alpha=0.85)
     b.axhline(0, color="k", lw=0.8)
     b.set_xticks(x); b.set_xticklabels(names, rotation=45, ha="right", fontsize=8)
     b.set_ylabel("skill = 1 - JS_model/JS_null")
@@ -712,15 +739,15 @@ def figure_feasibility(results, path, *, title=None):
     # C) AGGREGATE-marginal feasibility: JS(model/null vs observed) vs noise floors
     c = ax[1, 0]
     am = [r["aggregate"]["js_model"] for r in res]
-    ap = [r["aggregate"]["js_persistence"] for r in res]
-    acl = [r["aggregate"]["js_climatology"] for r in res]
+    ap = [r["aggregate"]["js_static"] for r in res]
+    acl = [r["aggregate"]["js_pooled"] for r in res]
     af = [r["aggregate"].get("js_noise_floor", np.nan) for r in res]
     pf = np.array([r["aggregate"].get("js_ppc_floor", np.nan) for r in res])
     pf_hi = np.array([r["aggregate"].get("js_ppc_floor_hi", np.nan) for r in res])
     pval = [r["aggregate"].get("ppc_pvalue", np.nan) for r in res]
     c.bar(x - 0.25, am, 0.25, label="model", color="#4c72b0")
-    c.bar(x, ap, 0.25, label="persistence", color="#c44e52", alpha=0.8)
-    c.bar(x + 0.25, acl, 0.25, label="climatology", color="#dd8452", alpha=0.8)
+    c.bar(x, ap, 0.25, label="static", color="#c44e52", alpha=0.8)
+    c.bar(x + 0.25, acl, 0.25, label="pooled population-average", color="#dd8452", alpha=0.8)
     # posterior-predictive noise band (model-implied), drawn under the model bar:
     # diamond = mean replicate-to-mean JS, whisker up to the 95th pct.
     yerr = np.vstack([np.zeros_like(pf), np.clip(pf_hi - pf, 0, None)])
@@ -741,10 +768,10 @@ def figure_feasibility(results, path, *, title=None):
 
     # D) elpd skill toward the saturated ceiling (per-clone)
     d = ax[1, 1]
-    se_p = [r["skill"]["skill_elpd_vs_persistence"] for r in res]
-    se_c = [r["skill"]["skill_elpd_vs_climatology"] for r in res]
-    d.bar(x - 0.2, se_p, 0.4, label="elpd skill vs persistence", color="#4c72b0")
-    d.bar(x + 0.2, se_c, 0.4, label="elpd skill vs climatology", color="#dd8452", alpha=0.85)
+    se_p = [r["skill"]["skill_elpd_vs_static"] for r in res]
+    se_c = [r["skill"]["skill_elpd_vs_pooled"] for r in res]
+    d.bar(x - 0.2, se_p, 0.4, label="elpd skill vs static", color="#4c72b0")
+    d.bar(x + 0.2, se_c, 0.4, label="elpd skill vs pooled pop-avg", color="#dd8452", alpha=0.85)
     d.axhline(0, color="k", lw=0.8)
     d.set_xticks(x); d.set_xticklabels(names, rotation=45, ha="right", fontsize=8)
     d.set_ylabel("(elpd_model - null) / (oracle - null)")
