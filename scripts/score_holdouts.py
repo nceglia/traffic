@@ -49,9 +49,9 @@ def main():
         scored.append(sc); results.append(res)
         s = sc.summary()
         print(f"  [predict ] {s['name']:16} n={s['n']:6d}  elpd={s['elpd_mean']:7.3f}  "
-              f"JS(w)={s['jsd_wmean']:.3f}  | skill_shape(vs persist/clim)="
-              f"{sk['skill_shape_vs_persistence']:+.2f}/{sk['skill_shape_vs_climatology']:+.2f}  "
-              f"agg.JS model/persist/floor={agg['js_model']:.3f}/{agg['js_persistence']:.3f}/"
+              f"JS(w)={s['jsd_wmean']:.3f}  | skill_shape(vs static/pooled)="
+              f"{sk['skill_shape_vs_static']:+.2f}/{sk['skill_shape_vs_pooled']:+.2f}  "
+              f"agg.JS model/static/floor={agg['js_model']:.3f}/{agg['js_static']:.3f}/"
               f"{agg['js_noise_floor']:.3f}")
 
     # results tables: per-clone summary + feasibility/skill
@@ -73,7 +73,8 @@ def main():
 
     # figures
     fig = scoring.figure_predictive(scored, os.path.join(out, "predictive.png"),
-                                    title=f"Held-out predictive accuracy -- {os.path.basename(sdir)}")
+                                    title=f"Held-out predictive accuracy -- {os.path.basename(sdir)}",
+                                    skills={r["skill"]["name"]: r["skill"] for r in results})
     print(f"wrote {fig}")
     fig = scoring.figure_feasibility(results, os.path.join(out, "feasibility.png"),
                                      title=f"Feasibility: model skill vs nulls -- {os.path.basename(sdir)}")
