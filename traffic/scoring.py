@@ -434,9 +434,62 @@ def skill(model, static, pooled, oracle_elpd):
     }
 
 
-def score_aggregate(name, Xt, Y, D, M_hat, pi, *, seed=0):
+def _ppc_aggregate_floor(Xt, D, M_draws, r_draws, obs_comp, *, n_rep=200, seed=0):
+    """Posterior-predictive noise floor for the aggregate destination composition.
+
+    The model-implied irreducible divergence: instead of splitting the *observed*
+    clones (a single, half-size, high-variance estimate), we draw `n_rep` replicate
+    datasets from the fitted posterior predictive -- each replicate picks a posterior
+    draw s, forms the NB mean mu = D*(x~ M_s), and samples Y_rep ~ NB2(mu, r_s) over
+    the observed states -- then pools each to an aggregate composition. Returns:
+      floor      mean JS(replicate, replicate-mean): the divergence the model says is
+                 pure sampling noise at the full sample size,
+      floor_hi   95th pct of that JS (upper edge of the noise band),
+      disc       JS(observed, replicate-mean): the posterior-predictive discrepancy,
+      pvalue     P(JS(rep, mean) >= disc): a posterior-predictive p. Large (~0.1-0.9)
+                 => the observed aggregate sits inside the model's own noise cloud;
+                 ~0 => a systematic shape miss beyond sampling noise.
+    """
+    obsv = D > 0
+    L = Xt.shape[1]
+    rng = np.random.default_rng(seed + 1)
+    n_draw = len(M_draws)
+    reps = np.empty((n_rep, L))
+    for i in range(n_rep):
+        s = int(rng.integers(n_draw))
+        mu = np.where(obsv, D * (Xt @ M_draws[s]), 0.0)
+        rb = np.broadcast_to(np.asarray(r_draws[s]), mu.shape)
+        finite = np.isfinite(rb)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            p = np.where(finite, rb / (rb + mu), 1.0)
+        p = np.clip(p, _EPS, 1.0)
+        nb = rng.negative_binomial(np.where(finite, rb, 1.0), p)   # NB where r finite
+        po = rng.poisson(np.where(finite, 0.0, mu))                # Poisson where r=inf
+        yi = np.where(obsv, np.where(finite, nb, po), 0.0)
+        reps[i] = yi.sum(0)
+    reps_comp = reps / np.maximum(reps.sum(1, keepdims=True), _EPS)
+    c_bar = reps_comp.mean(0)
+    c_bar = c_bar / max(c_bar.sum(), _EPS)
+    rep_js = np.array([_js(reps_comp[i], c_bar) for i in range(n_rep)])
+    disc = _js(obs_comp, c_bar)
+    return {
+        "js_ppc_floor": float(rep_js.mean()),
+        "js_ppc_floor_hi": float(np.quantile(rep_js, 0.95)),
+        "js_ppc_disc": float(disc),
+        "ppc_pvalue": float((rep_js >= disc).mean()),
+    }
+
+
+def score_aggregate(name, Xt, Y, D, M_hat, pi, *, M_draws=None, r_draws=None,
+                    n_rep=200, seed=0):
     """Aggregate-marginal feasibility: pooled predicted vs observed destination
-    composition, model vs nulls vs a replicate noise floor (JS of random halves).
+    composition, model vs nulls vs two noise floors.
+
+    Two floors are reported. The split-half floor (JS of two random observed halves)
+    is a quick, model-free, but high-variance reference. When posterior draws are
+    passed (`M_draws`, `r_draws`) we also compute the posterior-predictive floor
+    (`_ppc_aggregate_floor`): the divergence the *fitted model* implies is pure
+    sampling noise, plus a posterior-predictive p-value for the observed aggregate.
     """
     obsv = D > 0
     Yt = np.where(obsv, Y, 0.0)
@@ -451,7 +504,7 @@ def score_aggregate(name, Xt, Y, D, M_hat, pi, *, seed=0):
     cp, tp = _agg(baseline_mean("static", Xt, D))
     cc, tc = _agg(baseline_mean("pooled", Xt, D, pi))
 
-    # replicate noise floor: JS between two random halves of the observed clones
+    # split-half floor: JS between two random halves of the observed clones
     rng = np.random.default_rng(seed)
     perm = rng.permutation(Yt.shape[0])
     h1, h2 = perm[: len(perm) // 2], perm[len(perm) // 2:]
@@ -459,13 +512,17 @@ def score_aggregate(name, Xt, Y, D, M_hat, pi, *, seed=0):
     js_floor = _js(a1 / max(a1.sum(), _EPS), a2 / max(a2.sum(), _EPS))
 
     obs_tot = obs_agg.sum()
-    return {
+    out = {
         "name": name,
         "js_model": _js(obs_comp, cm), "js_static": _js(obs_comp, cp),
         "js_pooled": _js(obs_comp, cc), "js_noise_floor": float(js_floor),
         "total_ratio_model": float(tm / max(obs_tot, _EPS)),
         "total_ratio_static": float(tp / max(obs_tot, _EPS)),
     }
+    if M_draws is not None and r_draws is not None and len(M_draws):
+        out.update(_ppc_aggregate_floor(Xt, D, M_draws, r_draws, obs_comp,
+                                        n_rep=n_rep, seed=seed))
+    return out
 
 
 def evaluate_holdout(fit_path, obs, *, n_draws=400, seed=0):
@@ -493,7 +550,7 @@ def evaluate_holdout(fit_path, obs, *, n_draws=400, seed=0):
     static = score_baseline(name + "/static", Y, D, baseline_mean("static", Xt, D), r_bar)
     pooled = score_baseline(name + "/pooled", Y, D, baseline_mean("pooled", Xt, D, pi), r_bar)
     sk = skill(model, static, pooled, float(_saturated_elpd(Y, D, r_bar).mean()))
-    agg = score_aggregate(name, Xt, Y, D, fit.M_hat, pi, seed=seed)
+    agg = score_aggregate(name, Xt, Y, D, fit.M_hat, pi, M_draws=M, r_draws=r, seed=seed)
     return {"model": model, "static": static, "pooled": pooled,
             "skill": sk, "aggregate": agg}
 
@@ -679,20 +736,35 @@ def figure_feasibility(results, path, *, title=None):
     b.set_title("B. Shape skill (>0 = adds value over null)")
     b.legend(fontsize=8)
 
-    # C) AGGREGATE-marginal feasibility: JS(model/null vs observed) vs noise floor
+    # C) AGGREGATE-marginal feasibility: JS(model/null vs observed) vs noise floors
     c = ax[1, 0]
     am = [r["aggregate"]["js_model"] for r in res]
     ap = [r["aggregate"]["js_static"] for r in res]
     acl = [r["aggregate"]["js_pooled"] for r in res]
-    af = [r["aggregate"]["js_noise_floor"] for r in res]
+    af = [r["aggregate"].get("js_noise_floor", np.nan) for r in res]
+    pf = np.array([r["aggregate"].get("js_ppc_floor", np.nan) for r in res])
+    pf_hi = np.array([r["aggregate"].get("js_ppc_floor_hi", np.nan) for r in res])
+    pval = [r["aggregate"].get("ppc_pvalue", np.nan) for r in res]
     c.bar(x - 0.25, am, 0.25, label="model", color="#4c72b0")
     c.bar(x, ap, 0.25, label="static", color="#c44e52", alpha=0.8)
     c.bar(x + 0.25, acl, 0.25, label="pooled population-average", color="#dd8452", alpha=0.8)
-    c.plot(x, af, "k_", ms=14, mew=2.5, label="replicate noise floor")
+    # posterior-predictive noise band (model-implied), drawn under the model bar:
+    # diamond = mean replicate-to-mean JS, whisker up to the 95th pct.
+    yerr = np.vstack([np.zeros_like(pf), np.clip(pf_hi - pf, 0, None)])
+    c.errorbar(x - 0.25, pf, yerr=yerr, fmt="D", ms=5, color="#2e7d32",
+               ecolor="#2e7d32", elinewidth=2, capsize=3, zorder=5,
+               label="posterior-predictive floor (mean→95%)")
+    c.plot(x, af, "_", color="grey", ms=12, mew=2, zorder=4, label="split-half floor")
+    # posterior-predictive p-value annotated above each model bar
+    for xi, mi, pv in zip(x, am, pval):
+        if np.isfinite(pv):
+            c.annotate(f"p={pv:.2f}", (xi - 0.25, mi), fontsize=6, rotation=90,
+                       ha="center", va="bottom", xytext=(0, 2), textcoords="offset points")
     c.set_xticks(x); c.set_xticklabels(names, rotation=45, ha="right", fontsize=8)
     c.set_ylabel("JS(predicted aggregate, observed)")
-    c.set_title("C. Aggregate-marginal feasibility (model should approach floor)")
-    c.legend(fontsize=8)
+    c.set_title("C. Aggregate feasibility: model vs nulls, vs noise floors\n"
+                "(p = posterior-predictive p for observed aggregate; higher = within model noise)")
+    c.legend(fontsize=7)
 
     # D) elpd skill toward the saturated ceiling (per-clone)
     d = ax[1, 1]
