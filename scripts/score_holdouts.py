@@ -92,6 +92,48 @@ def main():
     else:
         print(f"full fit {full} not found -- skipping influence panels")
 
+    # ---- out-of-sample depth-calibration gate (acceptance test E on held-out predictions) ----
+    # Standardized within-source-tissue NB residual, aggregated to SOURCE SAMPLES (depth is a
+    # per-sample quantity, so a clone-level slope is clustered/ill-conditioned). Per holdout we
+    # report the sample-weighted mean residual; the depth SLOPE is fit only on the POOLED
+    # leave-one-patient-out set, whose test sets are disjoint (each patient predicted by a fit
+    # that never saw it) so pooling neither double-counts nor needs the thin per-holdout fits.
+    # in-sample-flat + holdout-flat closes the depth branch; a resolved pooled slope (|slope| >
+    # ~2 SE) with mean z off 0 reopens the exposure-model refit.
+    print("\n=== out-of-sample depth gate: within-tissue NB residual vs source depth (sample-level) ===")
+    pool = {t: {"logd": [], "z": [], "w": []} for t in ss.tissues}
+    for r in results:
+        g = r.get("depth_gate")
+        if not g:
+            continue
+        is_pat = r["model"].meta.get("split") == "patient"      # leave-one-patient-out -> disjoint
+        bt = g["by_tissue"]
+        cells = "  ".join(
+            (f"{t}:z={bt[t]['mean_z']:+.2f}(nS={bt[t]['n_samp']},nc={bt[t]['n_clones']})"
+             if np.isfinite(bt[t]["mean_z"]) else f"{t}:nS={bt[t]['n_samp']}(thin)")
+            for t in ss.tissues)
+        print(f"  [{'PT' if is_pat else '  '}] {r['skill']['name']:16} {cells}")
+        if is_pat:
+            for c, t in enumerate(ss.tissues):
+                sel = g["samp_tissue"] == c
+                if sel.any():
+                    pool[t]["logd"].append(g["samp_logd"][sel])
+                    pool[t]["z"].append(g["samp_z"][sel])
+                    pool[t]["w"].append(g["samp_w"][sel])
+    print("  --- POOLED slope over leave-one-patient-out holdouts (disjoint; N = #samples) ---")
+    for t in ss.tissues:
+        if not pool[t]["logd"]:
+            print(f"  {t:5s}: no out-of-sample samples"); continue
+        x = np.concatenate(pool[t]["logd"]); y = np.concatenate(pool[t]["z"]); w = np.concatenate(pool[t]["w"])
+        if x.size < 3:
+            print(f"  {t:5s}: nS={x.size} (too few samples to fit)"); continue
+        slope, se = scoring._wls_slope_se(x, y, w)
+        mz = float((w * y).sum() / w.sum())
+        resolved = np.isfinite(se) and abs(slope) > 2 * se
+        flag = "depth-tilt -> inspect refit" if (abs(mz) >= 0.15 or (resolved and abs(slope) > 0.05)) else "calibrated"
+        print(f"  {t:5s}: nS={x.size:3d}  nc={int(w.sum()):6d}  mean z={mz:+.3f}  "
+              f"slope={slope:+.3f} ± {se:.3f}  -> {flag}")
+
 
 if __name__ == "__main__":
     main()

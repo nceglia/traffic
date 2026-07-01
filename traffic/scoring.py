@@ -525,6 +525,88 @@ def score_aggregate(name, Xt, Y, D, M_hat, pi, *, M_draws=None, r_draws=None,
     return out
 
 
+def _wls_slope_se(x, y, w):
+    """Weighted-least-squares slope of y~x and its analytic-weight SE. NaN if x has no spread."""
+    x = np.asarray(x, float); y = np.asarray(y, float); w = np.asarray(w, float)
+    W = w.sum()
+    xb = (w * x).sum() / W
+    Sxx = (w * (x - xb) ** 2).sum()
+    if Sxx <= _EPS or len(x) < 3:
+        return np.nan, np.nan
+    yb = (w * y).sum() / W
+    slope = (w * (x - xb) * (y - yb)).sum() / Sxx
+    resid = y - (yb + slope * (x - xb))
+    sigma2 = (w * resid ** 2).sum() / max(len(x) - 2, 1)
+    return float(slope), float(np.sqrt(sigma2 / Sxx))
+
+
+def depth_residual_gate(Xt, X, Y, D, M_hat, r_col, ss, patient, src_tp):
+    """Out-of-sample depth-calibration gate (acceptance test E on held-out predictions).
+
+    Per held-out transition, the standardized NB residual on the within-SOURCE-TISSUE count
+        z = (obs_s - pred_s) / sqrt(pred_s + (Σ_k mean_k^2) / r_s)
+    (pred_s = Σ_k mean_k = posterior-mean predicted count in the clone's dominant source tissue;
+    the variance is the SUM of the per-phenotype NB2 variances, not that of a single NB2 at the
+    aggregated mean; r_s the source-tissue NB concentration), over ALL profiled transitions -- no
+    survival/recapture
+    conditioning, since that conditioning is itself depth-correlated selection.
+
+    The depth regressor d_s is a SAMPLE-level quantity (sequencing depth, identical for every
+    clone in a (patient, timepoint, tissue) sample), so a clone-level z-vs-log d regression is
+    clustered: it deflates the slope SE by ~sqrt(clones/sample) and goes singular when a holdout
+    spans one or two samples. We therefore aggregate z to the source sample (mean z per sample)
+    and regress sample-mean-z on sample log-depth, weighted by clone count, with N = #samples.
+    Out-of-sample the fit never saw these clones, so a real depth bias shows here undamped.
+
+    Returns {"by_tissue": {tissue: {n_clones, n_samp, mean_z, slope, se}}, "samp_logd",
+    "samp_z","samp_w","samp_tissue"} -- the per-sample points let the caller pool DISJOINT
+    holdouts (leave-one-patient-out partitions the patients) without double-counting.
+    """
+    S, K = ss.S, ss.K
+    J = Xt.shape[0]
+    ar = np.arange(J)
+    Xr_raw = X.reshape(J, S, K).sum(2)
+    Xr_shr = Xt.reshape(J, S, K).sum(2)
+    si = Xr_shr.argmax(1)                                       # dominant source tissue
+    d_src = Xr_raw[ar, si] / np.maximum(Xr_shr[ar, si], _EPS)   # source depth d_s = raw/share
+    prof = (D.reshape(J, S, K).sum(2) > 0)[ar, si]             # source tissue sequenced at t+1
+    obsv = D > 0
+    mean = np.where(obsv, D * (Xt @ M_hat), 0.0)
+    mean_src = mean.reshape(J, S, K)[ar, si, :]                 # [J,K] predicted means in source tissue
+    pred_s = mean_src.sum(1)
+    Yt = np.where(obsv, Y, 0.0)
+    obs_s = Yt.reshape(J, S, K).sum(2)[ar, si]
+    r_s = np.asarray(r_col, float)[si * K]                      # source-tissue concentration (inf -> Poisson)
+    # within-tissue total = sum of K independent per-state NB2 -> variance = sum of per-state vars
+    with np.errstate(divide="ignore", invalid="ignore"):
+        sd = np.sqrt(np.maximum(pred_s + (mean_src ** 2).sum(1) / r_s, 1e-9))
+    z = (obs_s - pred_s) / sd
+    keep = prof & (d_src > 0) & np.isfinite(z)
+    pat = np.asarray(patient)[keep]
+    tp = np.asarray(src_tp)[keep].astype(int)
+    ti = si[keep]; ld = np.log(d_src[keep]); zz = z[keep]
+    # aggregate to source samples (patient, timepoint, source tissue); ld is constant within one
+    key = np.array([f"{p}|{t}|{c}" for p, t, c in zip(pat, tp, ti)])
+    uk, inv = np.unique(key, return_inverse=True)
+    nS = np.bincount(inv).astype(float)
+    mz = np.bincount(inv, weights=zz) / nS
+    ldS = np.bincount(inv, weights=ld) / nS
+    tiS = np.array([ti[inv == k][0] for k in range(len(uk))]) if len(uk) else np.empty(0, int)
+    by = {}
+    for c, tname in enumerate(ss.tissues):
+        sel = tiS == c
+        nsamp = int(sel.sum()); ncl = int(nS[sel].sum())
+        if nsamp < 3:
+            by[tname] = {"n_clones": ncl, "n_samp": nsamp, "mean_z": np.nan,
+                         "slope": np.nan, "se": np.nan}
+            continue
+        slope, se = _wls_slope_se(ldS[sel], mz[sel], nS[sel])
+        by[tname] = {"n_clones": ncl, "n_samp": nsamp,
+                     "mean_z": float((nS[sel] * mz[sel]).sum() / nS[sel].sum()),
+                     "slope": slope, "se": se}
+    return {"by_tissue": by, "samp_logd": ldS, "samp_z": mz, "samp_w": nS, "samp_tissue": tiS}
+
+
 def evaluate_holdout(fit_path, obs, *, n_draws=400, seed=0):
     """Full feasibility evaluation of one predict-mode holdout.
 
@@ -551,8 +633,10 @@ def evaluate_holdout(fit_path, obs, *, n_draws=400, seed=0):
     pooled = score_baseline(name + "/pooled", Y, D, baseline_mean("pooled", Xt, D, pi), r_bar)
     sk = skill(model, static, pooled, float(_saturated_elpd(Y, D, r_bar).mean()))
     agg = score_aggregate(name, Xt, Y, D, fit.M_hat, pi, M_draws=M, r_draws=r, seed=seed)
+    gate = depth_residual_gate(Xt, obs.X[mask], Y, D, fit.M_hat, r_bar, ss,
+                               obs.patient[mask], obs.src_tp[mask])
     return {"model": model, "static": static, "pooled": pooled,
-            "skill": sk, "aggregate": agg}
+            "skill": sk, "aggregate": agg, "depth_gate": gate}
 
 
 # --------------------------------------------------------------------------- #

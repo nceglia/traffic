@@ -3,8 +3,11 @@
 Scores the global fit's one-step-ahead prediction for every forward transition
 and decomposes the destination prediction into three biologically distinct axes:
 
-  expansion   the total destination mass  N_j = sum_z mu_j(z)  -- did the clone
-              grow/shrink by the predicted amount (magnitude / net growth).
+  expansion   within-SOURCE-TISSUE count fold-change (predicted vs observed count in the
+              clone's source tissue) -- did the clone grow/shrink within its own tissue.
+              Restricting to the source tissue cancels that tissue's depth in the ratio, so
+              expansion is comparable across tissues (a within-tissue share fold-change, not
+              absolute fecundity) and not entangled with cross-tissue sampling depth.
   migration   the destination *tissue marginal*  c^tis_j(s) = sum_k c_j(s,k)
               -- did cells redistribute across PBMC/CSF/TP as predicted.
   switching   the *within-tissue phenotype* composition  c_j(k|s), averaged over
@@ -35,6 +38,7 @@ import numpy as np
 
 from traffic import data, io, statespace
 from traffic.readouts import _js
+from traffic.scoring import _wls_slope_se, _interval_cover
 
 ABUND_LABELS = ["1", "2", "3-4", "5-9", "10-49", "50+"]
 
@@ -63,12 +67,30 @@ def _js_rows(P, Q, eps=1e-12):
     return 0.5 * kl(P, M) + 0.5 * kl(Q, M)
 
 
-def decompose_prediction(Xt, Y, D, mean, ss):
+def decompose_prediction(Xt, Y, D, mean, ss, phi):
     """Per-clone expansion / migration / switching error for a predicted mean.
 
-    Returns dict of length-J arrays (NaN where undefined: shape axes need a
-    surviving clone; switching needs a tissue with both observed and predicted
-    mass).  expansion = |log predicted/observed total| (survivors).
+    expansion : the within-SOURCE-TISSUE count magnitude, scored three ways over ALL
+                profiled transitions (extinct included, NO survival conditioning -- which
+                would impose recapture selection: deep samples surface low-share clones
+                whose survivors are growers, biasing any survivor-conditioned metric):
+                  exp_cov : coverage -- is obs_s inside the 90% NB predictive interval
+                            (moment-matched to pred_s, Var_s). HEADLINE calibration; want ~0.90.
+                  exp_dss : Dawid-Sebastiani proper score (obs_s-pred_s)^2/Var_s + log Var_s,
+                            lower=better; compared to a null as a DIFFERENCE (not a 1-ratio,
+                            since DSS is not non-negative). The proper skill-vs-null metric.
+                  expansion : |standardized NB residual| |z| = |obs_s-pred_s|/sqrt(Var_s).
+                            DIAGNOSTIC ONLY (kept for the depth-calibration gate); not a
+                            proper score (a model can shrink it by inflating its variance).
+                Var_s = pred_s + (Σ_k mean_k^2)/phi: obs_s = Σ_k y_k is a sum of K
+                independent per-state NB2(mean_k, phi), so its variance is the SUM of
+                per-state variances -- NOT pred_s + pred_s^2/phi.
+    migration : JS on the destination tissue marginal (survivors -- a composition is
+                undefined for an extinct clone).
+    switching : tissue-mass-weighted JS of within-tissue phenotype composition (survivors).
+
+    Returns dict of length-J arrays (NaN where undefined) plus masks `surv` (recaptured)
+    and `prof_src` (source tissue profiled at t+1 -> expansion defined there).
     """
     S, K, L = ss.S, ss.K, ss.L
     J = Xt.shape[0]
@@ -84,12 +106,31 @@ def decompose_prediction(Xt, Y, D, mean, ss):
     Yt_tis = Yr.sum(2)            # [J,S] observed tissue mass
     Mt_tis = Mr.sum(2)            # [J,S] predicted tissue mass
 
-    # expansion: |log-ratio| of destination totals (survivors)
+    # expansion: UNCONDITIONAL standardized NB residual on the within-source-tissue count.
+    # Restricting to the clone's dominant source tissue cancels that tissue's depth in the
+    # comparison; standardizing by the NB sd makes it depth-calibrated; keeping extinct clones
+    # (no `surv` filter -- only "source tissue profiled") removes the recapture selection that
+    # made the old survivor-conditioned |log-ratio| slope with depth even when the fit is fine.
+    src_tis = Xt.reshape(J, S, K).sum(2).argmax(1)         # [J] dominant source tissue
+    prof_src = (D.reshape(J, S, K).sum(2) > 0)[np.arange(J), src_tis]   # source tissue sequenced at t+1
+    pred_s = Mt_tis[np.arange(J), src_tis]                 # predicted dest count in source tissue
+    obs_s = Yt_tis[np.arange(J), src_tis]                  # observed  dest count in source tissue
+    # obs_s = Σ_k y_k is a sum of K independent per-state NB2(mean_k, phi), so its variance is the
+    # SUM of per-state variances pred_s + (Σ_k mean_k^2)/phi -- NOT pred_s + pred_s^2/phi (the
+    # variance of a single NB2 at the aggregated mean, which overstates it by the cross terms).
+    m2_s = (Mr[np.arange(J), src_tis, :] ** 2).sum(1)      # Σ_k mean_k^2 in the source tissue
+    var_s = np.maximum(pred_s + m2_s / phi, 1e-9)
+    sd_s = np.sqrt(var_s)
+    # |z|: diagnostic only (feeds the depth-calibration gate; not a proper score).
     expansion = np.full(J, np.nan)
-    expansion[surv] = np.abs(np.log((N_pred[surv] + 0.5) / (N_obs[surv] + 0.5)))
-    # signed log-growth (relative to source size) for direction accuracy
-    obs_grow = np.full(J, np.nan); pred_grow = np.full(J, np.nan)
-    nsrc = np.maximum(Xt.sum(1) * 0 + Yt.sum(1) * 0, 0)  # placeholder, set by caller
+    expansion[prof_src] = np.abs((obs_s[prof_src] - pred_s[prof_src]) / sd_s[prof_src])
+    # DSS (proper score, lower=better) + 90% interval coverage (headline calibration).
+    exp_dss = np.full(J, np.nan)
+    exp_dss[prof_src] = ((obs_s[prof_src] - pred_s[prof_src]) ** 2 / var_s[prof_src]
+                         + np.log(var_s[prof_src]))
+    exp_cov = np.full(J, np.nan)
+    exp_cov[prof_src] = _interval_cover(obs_s[prof_src], pred_s[prof_src],
+                                        var_s[prof_src]).astype(float)
 
     # migration: JS on the tissue marginal (survivors)
     migration = np.full(J, np.nan)
@@ -110,8 +151,9 @@ def decompose_prediction(Xt, Y, D, mean, ss):
     have = w_acc > 0
     switching[have] = sw_acc[have] / w_acc[have]
 
-    return {"N_obs": N_obs, "N_pred": N_pred, "surv": surv,
-            "expansion": expansion, "migration": migration, "switching": switching}
+    return {"N_obs": N_obs, "N_pred": N_pred, "surv": surv, "prof_src": prof_src,
+            "expansion": expansion, "exp_dss": exp_dss, "exp_cov": exp_cov,
+            "migration": migration, "switching": switching}
 
 
 def stratum_summary(key, order, model_err, null_err, base_mask):
@@ -148,7 +190,8 @@ def main():
     S, K, L = ss.S, ss.K, ss.L
     Xt, Y, D = obs.Xtilde, obs.Y, obs.D
     J = Xt.shape[0]
-    print(f"fit={fit_path}  J={J}  L={L}  tissues={ss.tissues}")
+    phi = float(np.exp(np.asarray(fit.dispersion["params"]["log_r"]).mean())) if fit.dispersion else np.inf
+    print(f"fit={fit_path}  J={J}  L={L}  tissues={ss.tissues}  phi={phi:.3f}")
 
     # predicted destination means: model (M_hat), static null (M=I), pooled null (pi)
     obsv = D > 0
@@ -158,9 +201,9 @@ def main():
     mean_static = np.where(obsv, D * Xt, 0.0)
     mean_pooled = np.where(obsv, D * (Xt.sum(1, keepdims=True) * pi[None, :]), 0.0)
 
-    m = decompose_prediction(Xt, Y, D, mean_model, ss)
-    p = decompose_prediction(Xt, Y, D, mean_static, ss)    # static (no-change) null
-    c = decompose_prediction(Xt, Y, D, mean_pooled, ss)    # pooled population-average null
+    m = decompose_prediction(Xt, Y, D, mean_model, ss, phi)
+    p = decompose_prediction(Xt, Y, D, mean_static, ss, phi)    # static (no-change) null
+    c = decompose_prediction(Xt, Y, D, mean_pooled, ss, phi)    # pooled population-average null
 
     # strata
     n_src = obs.n_src.astype(int)
@@ -198,11 +241,17 @@ def main():
     if surv.any():
         mig_change[surv] = _js_rows(src_tis[surv], obs_tis[surv])
         swi_change[surv] = _js_rows(src_phe[surv], obs_phe[surv])
+    # expansion is now an UNCONDITIONAL calibration residual, so it has no "event" sub-selection:
+    # its base and mover masks are both "source tissue profiled" (all transitions we can score).
+    # migration/switching keep the survivor base and a mover threshold (their no-change null is
+    # trivially right on the non-mover majority, so skill is only meaningful where the event occurs).
+    prof_src = m["prof_src"]
     mover = {
-        "expansion": surv & (np.abs(obs_lg) > np.log(2)),     # >2x net size change
+        "expansion": prof_src,                                # all profiled (no survival/event filter)
         "migration": surv & (mig_change > 0.05),              # tissue distribution shifted
         "switching": surv & (swi_change > 0.05),              # phenotype distribution shifted
     }
+    axis_base = {"expansion": prof_src, "migration": surv, "switching": surv}
 
     axes = {"expansion": (m["expansion"], p["expansion"], c["expansion"]),
             "migration": (m["migration"], p["migration"], c["migration"]),
@@ -220,9 +269,10 @@ def main():
                     "skill_vs_static_movers", "skill_vs_pooled_movers"])
         for ax_name, (em, ep, ec) in axes.items():
             mv = mover[ax_name]
+            base = axis_base[ax_name]                            # expansion: profiled; shape axes: survivors
             for kind, (key, order) in strata.items():
-                sp = stratum_summary(key, order, em, ep, surv)       # all survivors
-                sc = stratum_summary(key, order, em, ec, surv)
+                sp = stratum_summary(key, order, em, ep, base)       # all (per-axis base)
+                sc = stratum_summary(key, order, em, ec, base)
                 spm = stratum_summary(key, order, em, ep, mv)        # movers only
                 scm = stratum_summary(key, order, em, ec, mv)
                 for rp, rc, rpm, rcm in zip(sp, sc, spm, scm):
@@ -288,10 +338,10 @@ def main():
     a.set_title("A. Expansion: predicted vs observed total (survivors, by abundance)")
     a.legend(fontsize=7, title="src clone size", markerscale=2)
     grouped_box(ax[0, 1], abin, ABUND_LABELS, m["expansion"], p["expansion"],
-                "|log(pred/obs total)|  (lower=better)",
-                "B. Expansion error by clone abundance (expanders)", mover["expansion"])
+                "|standardized NB residual|  |z|  (lower=better)",
+                "B. Within-tissue expansion residual |z| by clone abundance (all profiled)", mover["expansion"])
     by_group_bars(ax[1, 0], patient, pat_order, m["expansion"], p["expansion"], c["expansion"],
-                  mover["expansion"], "median |log-ratio|", "C. Expansion error by patient (expanders)")
+                  mover["expansion"], "median |z|", "C. Within-tissue expansion residual |z| by patient (all profiled)")
     d = ax[1, 1]
     rec = [recap[l] for l in ABUND_LABELS]
     diracc = [float(dir_ok[surv & (abin == l)].mean()) if (surv & (abin == l)).any() else np.nan
@@ -302,7 +352,7 @@ def main():
     d.set_xticks(xx); d.set_xticklabels(ABUND_LABELS, fontsize=8)
     d.set_ylim(0, 1.02); d.set_xlabel("source clone size")
     d.set_title("D. Recapture & growth-direction accuracy by abundance"); d.legend(fontsize=7)
-    fig.suptitle("Expansion (net growth / magnitude) -- global fit one-step prediction", y=0.995)
+    fig.suptitle("Expansion (within-tissue magnitude; headline = coverage@90 + DSS, |z| shown as diagnostic) -- global fit one-step prediction", y=0.995)
     fig.tight_layout(); fig.savefig(os.path.join(outdir, "expansion.png"), dpi=130); plt.close(fig)
     print(f"wrote {os.path.join(outdir, 'expansion.png')}")
 
@@ -375,7 +425,7 @@ def main():
                 a.text(ci, ri, f"{v:+.2f}\nn={n_grid[ri, ci]}", ha="center", va="center",
                        fontsize=6.5, color="k")
     a.axhline(len(ABUND_LABELS) - 0.5, color="k", lw=1.5)
-    a.set_title("Predictability skill vs static (no change), conditional on movers\n(+ = model adds value where the behavior occurs)")
+    a.set_title("Predictability skill vs static (no change)\n(expansion: all profiled, |z|; migration/switching: movers only)")
     fig.colorbar(im, ax=a, fraction=0.046, label="skill = 1 - err_model/err_static")
     rax = axx[1]
     rec = [recap[l] for l in ABUND_LABELS] + [np.nan] * len(pat_order)
@@ -391,19 +441,82 @@ def main():
     print(f"wrote {os.path.join(outdir, 'predictability_summary.png')}")
 
     # console headline: overall (all survivors) vs movers-only skill
-    print("\n=== axis medians: all survivors  vs  movers-only (the events of interest) ===")
+    print("\n=== axis medians: all (expansion: profiled; shape axes: survivors)  vs  movers-only ===")
     for ax_name, (em, ep, ec) in axes.items():
         mv = mover[ax_name]
+        base = axis_base[ax_name]
         def med(arr, msk):
             s = msk & np.isfinite(arr)
             return np.median(arr[s]) if s.any() else np.nan
-        sk_all = 1 - med(em, surv) / med(ep, surv) if med(ep, surv) > 1e-4 else np.nan
+        sk_all = 1 - med(em, base) / med(ep, base) if med(ep, base) > 1e-4 else np.nan
         sk_mv = 1 - med(em, mv) / med(ep, mv) if med(ep, mv) > 1e-4 else np.nan
-        print(f"  {ax_name:10} ALL: model={med(em, surv):.3f} static={med(ep, surv):.3f} "
-              f"pooled={med(ec, surv):.3f} skill_vs_static={sk_all:+.2f} (n={int((surv&np.isfinite(em)).sum())})")
+        print(f"  {ax_name:10} ALL: model={med(em, base):.3f} static={med(ep, base):.3f} "
+              f"pooled={med(ec, base):.3f} skill_vs_static={sk_all:+.2f} (n={int((base&np.isfinite(em)).sum())})")
         print(f"  {'':10} MOVERS: model={med(em, mv):.3f} static={med(ep, mv):.3f} "
-              f"pooled={med(ec, mv):.3f} skill_vs_static={sk_mv:+.2f} (n_movers={int(mv.sum())})")
+              f"pooled={med(ec, mv):.3f} skill_vs_static={sk_mv:+.2f} (n={int((mv&np.isfinite(em)).sum())})")
     print(f"  overall recapture rate = {surv.mean():.3f}")
+    # (removed: per-tissue g^within -- a cross-pool magnitude comparison, invalid under
+    #  compositional closure; see traffic/readouts.py CONTRACT. Report T-based redistribution
+    #  and within-pool RELATIVE share change instead.)
+
+    # expansion magnitude -- HEADLINE metrics: proper score (DSS) + calibration (coverage).
+    # |z| above is the depth diagnostic only; these are the reportable expansion numbers.
+    # DSS is a proper score (mean+variance) so model-vs-null is a DIFFERENCE null-minus-model
+    # (>0 = model better), not a 1-ratio skill (DSS is not non-negative).
+    ps = m["prof_src"]
+    def _med(a, msk):
+        sel = msk & np.isfinite(a)
+        return np.median(a[sel]) if sel.any() else np.nan
+    dss_m, dss_p, dss_c = m["exp_dss"], p["exp_dss"], c["exp_dss"]
+    cov_m = float(np.nanmean(m["exp_cov"][ps])); cov_p = float(np.nanmean(p["exp_cov"][ps]))
+    print("\n=== expansion magnitude (proper score + calibration; |z| is diagnostic only) ===")
+    print(f"  coverage@90%: model={cov_m:.3f}  static={cov_p:.3f}   (want ~0.90; <0.90 = over-confident)")
+    print(f"  median DSS  : model={_med(dss_m,ps):+.3f}  static={_med(dss_p,ps):+.3f}  pooled={_med(dss_c,ps):+.3f}  (lower=better)")
+    print(f"  DSS skill (null - model, >0 = model adds value): "
+          f"vs_static={_med(dss_p,ps)-_med(dss_m,ps):+.3f}  vs_pooled={_med(dss_c,ps)-_med(dss_m,ps):+.3f}"
+          f"  (n={int((ps&np.isfinite(dss_m)).sum())})")
+
+    # ===== ACCEPTANCE TEST (E): is the within-tissue magnitude depth-CALIBRATED? =====
+    # Standardized NB residual z = (obs - pred)/sqrt(pred + (Σ_k mean_k^2)/phi), over ALL profiled forward
+    # transitions (extinct included). NO survival conditioning -- conditioning on survival/recapture
+    # is itself depth-correlated selection (deep samples surface low-share clones whose survivors are
+    # growers), which makes survivor-conditioned point metrics (|log-ratio|) slope with depth even
+    # when the model is fine. mean z ~ 0 and flat vs source depth => model depth-calibrated within
+    # tissue and the readout fix is sufficient; a real slope => depth bias => exposure-model refit.
+    # CAVEAT (why this is necessary but not strongly sufficient): in-sample the slope is partly
+    # enforced by the fit -- mean z~0 is near-mechanical, and the depth tilt is absorbed wherever
+    # depth is collinear with the design -- and at this n even a small slope is many SE from 0, so
+    # "clean" is RELATIVE to the survivor-conditioned version. The decisive test is OUT-OF-SAMPLE
+    # (scripts/score_holdouts.py: depth gate on held-out predictions), where the fit can't have
+    # absorbed the residual. SE is printed here so the in-sample slope's resolution is visible.
+    Xr_raw = obs.X.reshape(J, S, K).sum(2); Xr_shr = Xt.reshape(J, S, K).sum(2)
+    si = Xr_shr.argmax(1)                                   # source tissue used for the metric
+    d_src = Xr_raw[np.arange(J), si] / np.maximum(Xr_shr[np.arange(J), si], 1e-12)   # depth d_s
+    prof = (D.reshape(J, S, K).sum(2) > 0)[np.arange(J), si]   # source tissue profiled at dest
+    mean_src = mean_model.reshape(J, S, K)[np.arange(J), si, :]   # [J,K] predicted means in source tissue
+    pred_s = mean_src.sum(1)
+    obs_s = Yt.reshape(J, S, K).sum(2)[np.arange(J), si]
+    # within-tissue total variance = sum of per-state NB2 variances (see decompose_prediction)
+    z = (obs_s - pred_s) / np.sqrt(np.maximum(pred_s + (mean_src ** 2).sum(1) / phi, 1e-9))
+    print("\n=== ACCEPTANCE TEST: standardized NB residual vs source depth, within tissue ===")
+    print("    (unconditional; aggregated to source samples [patient x tp x tissue], slope across "
+          "samples weighted by clone count; want mean z~0, slope within ~2 SE)")
+    for ti, tname in enumerate(ss.tissues):
+        sel = prof & (si == ti) & (d_src > 0) & np.isfinite(z)
+        n = int(sel.sum())
+        if n < 20:
+            print(f"  {tname:5s}: n={n} (too few)"); continue
+        key = np.array([f"{p}|{t}" for p, t in zip(patient[sel], src_tp[sel])])
+        uk, inv = np.unique(key, return_inverse=True)
+        nS = np.bincount(inv).astype(float)
+        mz_s = np.bincount(inv, weights=z[sel]) / nS
+        ld_s = np.bincount(inv, weights=np.log(d_src[sel])) / nS
+        mz = float((nS * mz_s).sum() / nS.sum())
+        slope, se = _wls_slope_se(ld_s, mz_s, nS)
+        resolved = np.isfinite(se) and abs(slope) > 2 * se
+        flag = "DEPTH-BIASED -> refit" if (abs(mz) >= 0.15 or (resolved and abs(slope) > 0.05)) else "calibrated (clean)"
+        print(f"  {tname:5s}: nS={len(uk):3d} (n={n:6d})  mean z={mz:+.3f}  "
+              f"slope={slope:+.3f} ± {se:.3f}  -> {flag}")
 
 
 if __name__ == "__main__":
