@@ -10,9 +10,19 @@ class PriorConfig:
 
     a0 = b0 = 1 puts a weak Exponential(1) prior on every growth-matrix entry
     (prior mean 1 = "one descendant per source cell", prior over-dispersed).
+
+    a0_stay lifts the WITHIN-tissue ("stay") entries to a larger Gamma shape than the
+    cross-tissue ("go") entries, so the prior favours persistence instead of the uniform
+    (anti-persistence) default. iid a0 => the transition row is Dirichlet(1,...,1) = uniform
+    over all L states, i.e. prior E[stay in source tissue] = K/L = 1/3; boosting the diagonal
+    block to a0_stay gives prior E[stay] = a0_stay / (a0_stay + (S-1) a0).
+      None    -> off: every entry uses a0 (reproduces the original uniform prior).
+      float   -> global: all three within-tissue blocks share one stay-shape.
+      (S,)    -> per source tissue (e.g. PBMC/CSF/TP), so CSF (transit) can stay low.
     """
     a0: float = 1.0
     b0: float = 1.0
+    a0_stay: "float | tuple | None" = None
 
 
 @dataclass(frozen=True)

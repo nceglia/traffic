@@ -29,18 +29,35 @@ from .config import LikelihoodConfig, MCMCConfig, PriorConfig
 _DISP_SITES = {"global": ["log_r"], "tissue": ["log_r_s"], "patient": ["mu_s", "sigma", "eps"]}
 
 
-def numpyro_model(Xtilde, Y, D, a0, b0, family, dispersion, alpha_scale, sigma_scale,
+def a0_matrix(prior: PriorConfig, L: int, S: int = 3) -> np.ndarray:
+    """(L, L) Gamma-shape matrix: cross-tissue entries = a0; within-tissue ('stay') blocks =
+    a0_stay. a0_stay: None -> off (= a0 everywhere); scalar -> global; length-S -> per source
+    tissue. State index z = tissue*K + phenotype, so tissue a's block is rows/cols [a*K:(a+1)*K].
+    """
+    K = L // S
+    a0 = np.full((L, L), float(prior.a0))
+    stay = prior.a0_stay
+    if stay is not None:
+        stay = [float(stay)] * S if np.isscalar(stay) else [float(x) for x in stay]
+        if len(stay) != S:
+            raise ValueError(f"a0_stay must be a scalar or length-{S}; got {prior.a0_stay!r}")
+        for a in range(S):
+            a0[a * K:(a + 1) * K, a * K:(a + 1) * K] = stay[a]
+    return a0
+
+
+def numpyro_model(Xtilde, Y, D, a0_mat, b0, family, dispersion, alpha_scale, sigma_scale,
                   col_tissue, patient_idx, n_patient):
     """One generative model; Poisson or NB with structured dispersion.
 
-    Static args (family, dispersion, scales, n_patient) drive control flow at trace
-    time; col_tissue [L] and patient_idx [J] are integer index arrays.
+    a0_mat [L,L] is the per-entry Gamma shape (persistence-aware; see `a0_matrix`). Static args
+    (family, dispersion, scales, n_patient) drive control flow at trace time; col_tissue [L] and
+    patient_idx [J] are integer index arrays.
     """
     import numpyro
     import numpyro.distributions as dist
 
-    L = Xtilde.shape[1]
-    M = numpyro.sample("M", dist.Gamma(jnp.full((L, L), a0), jnp.full((L, L), b0)).to_event(2))
+    M = numpyro.sample("M", dist.Gamma(a0_mat, b0).to_event(2))
     mean = D * (Xtilde @ M)                        # [J, L]
     observed = D > 0
     safe_mean = jnp.where(observed, mean, 1.0)     # avoid 0*log(0) at masked states
@@ -112,6 +129,7 @@ def fit_nuts(Xtilde, Y, D, prior: PriorConfig = PriorConfig(), cfg: MCMCConfig =
     Dj = jnp.asarray(D, dtype)
     L = Xt.shape[1]
     col_tissue = jnp.repeat(jnp.arange(3), L // 3)         # destination tissue of each column
+    a0_mat = jnp.asarray(a0_matrix(prior, L), dtype)       # persistence-aware Gamma shape [L,L]
 
     n_patient = 0
     if lik.dispersion == "patient":
@@ -126,7 +144,7 @@ def fit_nuts(Xtilde, Y, D, prior: PriorConfig = PriorConfig(), cfg: MCMCConfig =
     mcmc = MCMC(kernel, num_warmup=cfg.num_warmup, num_samples=cfg.num_samples,
                 num_chains=cfg.num_chains, chain_method=cfg.chain_method,
                 progress_bar=cfg.progress_bar)
-    mcmc.run(jax.random.PRNGKey(cfg.seed), Xt, Yj, Dj, prior.a0, prior.b0,
+    mcmc.run(jax.random.PRNGKey(cfg.seed), Xt, Yj, Dj, a0_mat, prior.b0,
              lik.family, lik.dispersion, lik.alpha_scale, lik.sigma_scale,
              col_tissue, patient_idx, n_patient, extra_fields=("diverging",))
 
