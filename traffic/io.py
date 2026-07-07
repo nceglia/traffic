@@ -26,6 +26,7 @@ class SavedFit:
     rho: np.ndarray | None = None   # [S, K] phenotype dist by tissue (optional)
     meta: dict = field(default_factory=dict)
     dispersion: dict | None = None  # {"mode": str, "params": {site: [N,...]}} for NB fits
+    factors: dict | None = None     # {"g": [N,L], "pi": [N,L,S], "Phi": [N,L,S,K]} for factored fits
 
     def draws(self, n: int = 2000, seed: int = 0) -> np.ndarray:
         """[n, L, L] posterior draws of M (a random subset if n < n_draws). numpy only."""
@@ -60,6 +61,11 @@ def save_fit(path, result, *, ss: StateSpace, rho=None, meta=None) -> str:
             payload[f"disp_{k}"] = np.asarray(arr, np.float32)
     else:
         info["family"] = "poisson"
+    fac = getattr(result, "factors", None)
+    if fac:
+        info["parameterization"] = "factored"
+        for k, arr in fac.items():
+            payload[f"factor_{k}"] = np.asarray(arr, np.float32)
     payload["meta"] = np.array(json.dumps(info))
     path = str(path)
     if not path.endswith(".npz"):
@@ -78,7 +84,9 @@ def load_fit(path) -> SavedFit:
     disp_keys = [f for f in files if f.startswith("disp_")]
     dispersion = ({"mode": meta.get("dispersion_mode"),
                    "params": {f[5:]: z[f] for f in disp_keys}} if disp_keys else None)
+    fac_keys = [f for f in files if f.startswith("factor_")]
+    factors = {f[len("factor_"):]: z[f] for f in fac_keys} if fac_keys else None
     return SavedFit(
         M_hat=z["M_hat"], samples=z["samples"], ss=ss,
-        rho=z["rho"] if "rho" in files else None, meta=meta, dispersion=dispersion,
+        rho=z["rho"] if "rho" in files else None, meta=meta, dispersion=dispersion, factors=factors,
     )

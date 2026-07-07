@@ -1,16 +1,17 @@
-"""traffic -- Bayesian Gamma-Poisson population-dynamics model for clonal
-T-cell trafficking across tissue and phenotype (JAX + NumPyro / NUTS).
+"""traffic -- Bayesian population-dynamics model for clonal T-cell trafficking across
+tissue and phenotype, with a factored one-step operator M = diag(g).(pi (x) Phi) and a
+Negative-Binomial likelihood (JAX + NumPyro / NUTS).
 
-Executable form of gbm_trafficking/docs/model_methods.tex.
+Executable form of docs/model_methods.tex.
 """
 from . import model, simulate, statespace
-from .config import LikelihoodConfig, MCMCConfig, PriorConfig
+from .config import FactoredPriorConfig, MCMCConfig
 from .statespace import StateSpace
 from .statespace import default as default_statespace
 
 __all__ = [
     "StateSpace", "default_statespace",
-    "PriorConfig", "MCMCConfig", "LikelihoodConfig",
+    "FactoredPriorConfig", "MCMCConfig",
     "model", "simulate", "statespace",
 ]
 

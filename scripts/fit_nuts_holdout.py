@@ -20,10 +20,10 @@ import os
 
 import jax
 
-jax.config.update("jax_enable_x64", os.environ.get("TRAFFIC_X64", "0") != "0")
+jax.config.update("jax_enable_x64", True)   # factored NB2 needs float64
 import numpy as np
 
-from traffic import LikelihoodConfig, MCMCConfig, PriorConfig, data, io, mcmc, statespace
+from traffic import FactoredPriorConfig, MCMCConfig, data, io, mcmc, statespace
 
 
 def main():
@@ -50,30 +50,25 @@ def main():
 
     X, Y, D = obs.Xtilde[train], obs.Y[train], obs.D[train]
 
-    lik = LikelihoodConfig(family=os.environ.get("TRAFFIC_LIKELIHOOD", "poisson"),
-                           dispersion=os.environ.get("TRAFFIC_DISPERSION", "none"))
-    patient_idx = None
-    if lik.dispersion == "patient":
-        ptr = np.asarray(obs.patient)[train]
-        pmap = {p: i for i, p in enumerate(sorted(set(ptr.tolist())))}
-        patient_idx = np.array([pmap[p] for p in ptr])
+    _as = [float(x) for x in os.environ.get("TRAFFIC_ALPHA_STAY", "4").split(",")]
+    prior = FactoredPriorConfig(alpha_stay=_as[0] if len(_as) == 1 else tuple(_as))
 
     cfg = MCMCConfig(
         num_warmup=int(os.environ.get("TRAFFIC_WARMUP", "1000")),
         num_samples=int(os.environ.get("TRAFFIC_SAMPLES", "1000")),
         num_chains=int(os.environ.get("TRAFFIC_CHAINS", "2")),
     )
-    print(f"holdout t={t}  backend={jax.default_backend()}  likelihood={lik.family}/{lik.dispersion}  "
+    print(f"holdout t={t}  backend={jax.default_backend()}  factored NB2 alpha_stay={prior.alpha_stay}  "
           f"J_total={obs.Xtilde.shape[0]}  J_train={X.shape[0]}  "
           f"J_test(into_t)={int(test_into_t.sum())}  excluded_src_tp={sorted(set(stp[touches_t].tolist()))}  "
           f"warmup={cfg.num_warmup} samples={cfg.num_samples} chains={cfg.num_chains}")
 
-    res = mcmc.fit_nuts(X, Y, D, PriorConfig(), cfg, lik=lik, patient_idx=patient_idx)
+    res = mcmc.fit_nuts(X, Y, D, prior, cfg)
     print(f"divergences={res.num_divergences}  r_hat_max={res.r_hat_max:.3f}  "
           f"ess_min={res.ess_min:.0f}")
 
     path = io.save_fit(out, res, ss=ss, rho=rho, meta={
-        "likelihood": lik.family, "dispersion": lik.dispersion,
+        "parameterization": "factored", "alpha_stay": str(prior.alpha_stay),
         "holdout_t": t,
         "excluded_src_tp": sorted(set(int(s) for s in stp[touches_t].tolist())),
         "test_src_tp": t - 1,

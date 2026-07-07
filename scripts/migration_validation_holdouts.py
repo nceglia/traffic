@@ -25,12 +25,9 @@ from traffic.readouts import decompose, tissue_traffic  # noqa: E402
 
 def _phi(fit):
     d = fit.dispersion
-    if not d:
+    if not d:                      # Poisson -> no overdispersion
         return np.inf
-    try:
-        return float(np.exp(np.asarray(d["params"]["log_r"]).mean()))
-    except Exception:
-        return float(np.exp(np.asarray(d["params"].get("log_r_s", [0])).mean()))
+    return float(np.exp(np.asarray(d["params"]["log_r"]).mean()))   # global NB2 concentration
 
 
 def _mig_skill_auc(fit_h, obs, ss, mask, phi_h):
