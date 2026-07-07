@@ -5,34 +5,33 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
-class PriorConfig:
-    """Per-entry Gamma(a0, b0) prior on M_{zz'} (shape, rate).
+class FactoredPriorConfig:
+    """Priors for the factored operator  M = diag(g) . (pi (x) Phi).
 
-    a0 = b0 = 1 puts a weak Exponential(1) prior on every growth-matrix entry
-    (prior mean 1 = "one descendant per source cell", prior over-dispersed).
+    Each source state z=(a,u) draws three factors, assembled into the mean matrix
+    M[z, b*K+v] = g[z] * pi[z,b] * Phi[z,b,v]:
+      g_{a,u}       ~ LogNormal(mu_g, sigma_g^2)   per-state EXPANSION factor (centred ~1, heavy tail)
+      pi_{(a,u)}    ~ Dirichlet(alpha_a)           destination-tissue distribution (trafficking)
+      Phi_{(a,u),b} ~ Dirichlet(beta * 1)          destination-phenotype distribution (switching)
+    plus a single global NB2 concentration  log phi ~ Normal(0, sigma_phi^2).
 
-    a0_stay lifts the WITHIN-tissue ("stay") entries to a larger Gamma shape than the
-    cross-tissue ("go") entries, so the prior favours persistence instead of the uniform
-    (anti-persistence) default. iid a0 => the transition row is Dirichlet(1,...,1) = uniform
-    over all L states, i.e. prior E[stay in source tissue] = K/L = 1/3; boosting the diagonal
-    block to a0_stay gives prior E[stay] = a0_stay / (a0_stay + (S-1) a0).
-      None    -> off: every entry uses a0 (reproduces the original uniform prior).
-      float   -> global: all three within-tissue blocks share one stay-shape.
-      (S,)    -> per source tissue (e.g. PBMC/CSF/TP), so CSF (transit) can stay low.
+    Persistence prior: the tissue Dirichlet gives the stay column (b=a) concentration `alpha_stay`
+    and the off-tissue columns `alpha_off`, so a priori a clone's descendants STAY rather than
+    scatter (induced E[pi(stay)] = alpha_stay / (alpha_stay + (S-1) alpha_off)). `alpha_stay` is a
+    scalar (global) or length-S (per source tissue, e.g. a lower stay for CSF as a transit
+    compartment). `beta` is the symmetric switching concentration.
     """
-    a0: float = 1.0
-    b0: float = 1.0
-    a0_stay: "float | tuple | None" = None
+    mu_g: float = 0.0            # LogNormal location for g (centred ~1)
+    sigma_g: float = 0.5        # LogNormal scale (heavy right tail)
+    alpha_off: float = 1.0      # Dirichlet conc. on off-tissue destinations of pi
+    alpha_stay: "float | tuple" = 4.0   # stay (b=a) conc.; scalar=global, length-S=per source tissue
+    beta: float = 1.0           # symmetric Dirichlet conc. for Phi (switching)
+    sigma_phi: float = 1.0      # Normal-prior scale on log phi (NB2 concentration)
 
 
 @dataclass(frozen=True)
 class MCMCConfig:
-    """NUTS settings for the marginal posterior over M.
-
-    Samples M directly from p(M | data): the per-source allocations marginalize
-    exactly by Poisson superposition, so the target is the smooth L x L posterior
-    with no auxiliary variables.
-    """
+    """NUTS settings for the factored posterior over {g, pi, Phi, log phi}."""
     num_warmup: int = 800
     num_samples: int = 800
     num_chains: int = 2
@@ -40,18 +39,3 @@ class MCMCConfig:
     chain_method: str = "vectorized"  # parallel chains via vmap on one device
     seed: int = 0
     progress_bar: bool = False
-
-
-@dataclass(frozen=True)
-class LikelihoodConfig:
-    """Observation likelihood + dispersion structure.
-
-    family = "poisson" (default) or "nb" (Negative-Binomial, var = mean + mean^2/r).
-    dispersion = "none" | "global" | "tissue" | "patient" (= tissue x patient).
-    Log-concentration parameterization: log r ~ Normal(0, alpha_scale); r = exp(log r);
-    large r recovers Poisson. NB requires float64.
-    """
-    family: str = "poisson"
-    dispersion: str = "none"
-    alpha_scale: float = 1.0     # Normal-prior scale on log r (dispersion level)
-    sigma_scale: float = 0.5     # patient mode: HalfNormal scale on the tissue x patient log-r sd

@@ -1,101 +1,87 @@
-"""Gradient-based MCMC backend -- sample M (and dispersion) from the posterior.
+"""Gradient-based MCMC backend -- sample the factored operator from the posterior.
 
-By Poisson superposition the per-source allocations of each destination count
-marginalize exactly, leaving M (plus, under a Negative-Binomial likelihood, a few
-dispersion parameters) as the unknowns -- a smooth target with no auxiliary
-allocation variables. NUTS samples it directly; positivity is handled by NumPyro's
-automatic log-transform of the constrained supports.
+The one-step mean matrix is factored  M = diag(g) . (pi (x) Phi):
+    g_{a,u}       ~ LogNormal(mu_g, sigma_g^2)      per-state expansion factor
+    pi_{(a,u)}    ~ Dirichlet(alpha_a)              destination-tissue distribution (trafficking)
+    Phi_{(a,u),b} ~ Dirichlet(beta * 1)             destination-phenotype distribution (switching)
+    M[z, b*K+v]   = g[z] * pi[z,b] * Phi[z,b,v]     (row sum = g[z]; T = M/g row-stochastic)
+    log phi       ~ Normal(0, sigma_phi^2)          single GLOBAL NB2 concentration (NumPyro site "log_r")
+    y_j(z')       ~ NB2(mean = d_{j,s'} * (x~ M)(z'), phi)   over non-missing tissues
 
-Likelihood (see config.LikelihoodConfig):
-    family = "poisson":  y ~ Poisson(d * x~ M)
-    family = "nb":       y ~ NegBinomial2(mean = d * x~ M,  concentration r = exp(log_r))
-                         dispersion = none | global | tissue | patient(=tissue x patient)
-
-Dispersion uses a log-concentration parameterization (log_r ~ Normal): smooth for
-HMC, a soft Poisson limit at log_r -> +inf, and no 1/alpha reciprocal or alpha->0
-funnel. NB requires float64 (the gammaln/digamma terms with large counts are
-f32-unstable).
+NUTS samples {g, pi, Phi, log phi} in the unconstrained reparameterization (log for g, NumPyro's
+simplex bijections for pi, Phi); M is a deterministic site. NB2 needs float64 (the gammaln/digamma
+terms with large counts are f32-unstable). There is one model -- no Gamma path, no dispersion modes.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .config import LikelihoodConfig, MCMCConfig, PriorConfig
-
-_DISP_SITES = {"global": ["log_r"], "tissue": ["log_r_s"], "patient": ["mu_s", "sigma", "eps"]}
+from .config import FactoredPriorConfig, MCMCConfig
 
 
-def a0_matrix(prior: PriorConfig, L: int, S: int = 3) -> np.ndarray:
-    """(L, L) Gamma-shape matrix: cross-tissue entries = a0; within-tissue ('stay') blocks =
-    a0_stay. a0_stay: None -> off (= a0 everywhere); scalar -> global; length-S -> per source
-    tissue. State index z = tissue*K + phenotype, so tissue a's block is rows/cols [a*K:(a+1)*K].
+def alpha_pi_matrix(prior: FactoredPriorConfig, L: int, S: int = 3) -> np.ndarray:
+    """(L, S) Dirichlet concentration for pi: off-tissue columns = alpha_off; the stay column
+    (b = tissue(z)) = alpha_stay. State index z = tissue*K + phenotype, so rows [a*K:(a+1)*K] are
+    tissue a's states and get the boosted concentration on column a. alpha_stay: scalar -> global;
+    length-S -> per source tissue.
     """
     K = L // S
-    a0 = np.full((L, L), float(prior.a0))
-    stay = prior.a0_stay
-    if stay is not None:
-        stay = [float(stay)] * S if np.isscalar(stay) else [float(x) for x in stay]
-        if len(stay) != S:
-            raise ValueError(f"a0_stay must be a scalar or length-{S}; got {prior.a0_stay!r}")
-        for a in range(S):
-            a0[a * K:(a + 1) * K, a * K:(a + 1) * K] = stay[a]
-    return a0
+    A = np.full((L, S), float(prior.alpha_off))
+    stay = prior.alpha_stay
+    stay = [float(stay)] * S if np.isscalar(stay) else [float(x) for x in stay]
+    if len(stay) != S:
+        raise ValueError(f"alpha_stay must be a scalar or length-{S}; got {prior.alpha_stay!r}")
+    for a in range(S):
+        A[a * K:(a + 1) * K, a] = stay[a]
+    return A
 
 
-def numpyro_model(Xtilde, Y, D, a0_mat, b0, family, dispersion, alpha_scale, sigma_scale,
-                  col_tissue, patient_idx, n_patient):
-    """One generative model; Poisson or NB with structured dispersion.
+def assemble(g, pi, Phi):
+    """M[z, b*K+v] = g[z] * pi[z,b] * Phi[z,b,v].  Shared by the model AND simulate (one reshape
+    convention). Shapes: g [L], pi [L,S], Phi [L,S,K] -> M [L, L] with columns ordered b*K+v to
+    match statespace z = tissue*K + phenotype.
+    """
+    L, S, K = Phi.shape
+    assert S * K == L, f"assemble: S*K ({S}*{K}) must equal L ({L})"
+    return (g[:, None, None] * pi[:, :, None] * Phi).reshape(L, L)
 
-    a0_mat [L,L] is the per-entry Gamma shape (persistence-aware; see `a0_matrix`). Static args
-    (family, dispersion, scales, n_patient) drive control flow at trace time; col_tissue [L] and
-    patient_idx [J] are integer index arrays.
+
+def numpyro_model_factored(Xtilde, Y, D, alpha_pi, beta, mu_g, sigma_g, sigma_phi, S=3):
+    """Factored generative model with a global NB2 likelihood. `alpha_pi` [L,S] is the per-state
+    tissue-Dirichlet concentration; (beta, mu_g, sigma_g, sigma_phi, S) are the prior scalars.
     """
     import numpyro
     import numpyro.distributions as dist
 
-    M = numpyro.sample("M", dist.Gamma(a0_mat, b0).to_event(2))
-    mean = D * (Xtilde @ M)                        # [J, L]
+    L = alpha_pi.shape[0]
+    K = L // S
+    g = numpyro.sample("g", dist.LogNormal(mu_g, sigma_g).expand([L]).to_event(1))               # [L]
+    pi = numpyro.sample("pi", dist.Dirichlet(alpha_pi).to_event(1))                              # [L,S]
+    Phi = numpyro.sample("Phi", dist.Dirichlet(beta * jnp.ones(K)).expand([L, S]).to_event(2))   # [L,S,K]
+    M = numpyro.deterministic("M", assemble(g, pi, Phi))                                         # [L,L]
+
     observed = D > 0
-    safe_mean = jnp.where(observed, mean, 1.0)     # avoid 0*log(0) at masked states
-
-    if family == "poisson":
-        numpyro.sample("Y", dist.Poisson(safe_mean).mask(observed), obs=Y)
-        return
-
-    # Negative-Binomial: concentration r = exp(log_r), log_r ~ Normal (soft Poisson
-    # limit at log_r -> +inf; no reciprocal / alpha->0 funnel).
-    if dispersion == "global":
-        log_r = numpyro.sample("log_r", dist.Normal(0.0, alpha_scale))
-    elif dispersion == "tissue":
-        log_r_s = numpyro.sample("log_r_s", dist.Normal(0.0, alpha_scale).expand([3]).to_event(1))
-        log_r = log_r_s[col_tissue]                # [L]
-    elif dispersion == "patient":                  # tissue x patient, non-centered, pooled
-        mu_s = numpyro.sample("mu_s", dist.Normal(0.0, alpha_scale).expand([3]).to_event(1))
-        sigma = numpyro.sample("sigma", dist.HalfNormal(sigma_scale))
-        eps = numpyro.sample("eps", dist.Normal(0.0, 1.0).expand([n_patient, 3]).to_event(2))
-        log_r = (mu_s[None, :] + sigma * eps)[patient_idx][:, col_tissue]   # [J, L]
-    else:
-        raise ValueError(f"unknown dispersion {dispersion!r}")
-    r = jnp.exp(log_r)
-    numpyro.sample("Y", dist.NegativeBinomial2(safe_mean, jnp.broadcast_to(r, mean.shape)).mask(observed),
-                   obs=Y)
+    safe_mean = jnp.where(observed, D * (Xtilde @ M), 1.0)     # avoid 0*log(0) at masked states
+    log_r = numpyro.sample("log_r", dist.Normal(0.0, sigma_phi))   # NB concentration; site name log_r
+    numpyro.sample("Y", dist.NegativeBinomial2(safe_mean, jnp.exp(log_r)).mask(observed), obs=Y)
 
 
 @dataclass
 class MCMCResult:
-    samples: np.ndarray      # [N, L, L] posterior draws of M (chains flattened)
+    samples: np.ndarray      # [N, L, L] posterior draws of the assembled M (chains flattened)
     M_hat: np.ndarray        # posterior mean   [L, L]
     M_median: np.ndarray     # posterior median [L, L]
     sd: np.ndarray           # posterior sd     [L, L]
     num_divergences: int
-    r_hat_max: float         # max split-Rhat over entries (->1 = converged)
-    ess_min: float           # min effective sample size over entries
+    r_hat_max: float         # max split-Rhat over the free sites {g,pi,Phi,log_r} (->1 = converged)
+    ess_min: float           # min ESS over the IDENTIFIED block {g,pi,log_r} (off-route Phi excluded)
     n_draws: int
-    dispersion: dict | None = None   # {"mode": str, "params": {site: [N,...]}} for NB; None for Poisson
+    dispersion: dict | None = None   # {"mode": "global", "params": {"log_r": [N]}}
+    factors: dict | None = None      # {"g": [N,L], "pi": [N,L,S], "Phi": [N,L,S,K]}
 
     @property
     def mean(self):
@@ -111,56 +97,54 @@ class MCMCResult:
         return self.samples[idx]
 
 
-def fit_nuts(Xtilde, Y, D, prior: PriorConfig = PriorConfig(), cfg: MCMCConfig = MCMCConfig(),
-             lik: LikelihoodConfig = LikelihoodConfig(), patient_idx=None) -> MCMCResult:
-    """Sample M (and NB dispersion, if any) from p(. | data) by NUTS."""
+def fit_nuts(Xtilde, Y, D, prior: FactoredPriorConfig = FactoredPriorConfig(),
+             cfg: MCMCConfig = MCMCConfig()) -> MCMCResult:
+    """Sample the factored operator {g, pi, Phi, log phi} from p(. | data) by NUTS."""
     import numpyro
     from numpyro.diagnostics import summary
     from numpyro.infer import MCMC, NUTS
 
-    if lik.family == "nb" and not jax.config.read("jax_enable_x64"):
-        import warnings
-        warnings.warn("NB likelihood is numerically unstable in float32 (the gammaln/"
-                      "digamma terms with large counts); enable x64 via "
-                      "jax.config.update('jax_enable_x64', True).", RuntimeWarning)
-    dtype = jnp.float64 if jax.config.read("jax_enable_x64") else jnp.float32
+    if not jax.config.read("jax_enable_x64"):
+        raise RuntimeError("The factored NB2 fit requires float64 (gammaln/digamma with large "
+                           "counts are f32-unstable). Enable it before fitting: "
+                           "jax.config.update('jax_enable_x64', True).")
+    dtype = jnp.float64                                    # guaranteed by the x64 guard above
     Xt = jnp.asarray(Xtilde, dtype)
     Yj = jnp.asarray(Y, dtype)
     Dj = jnp.asarray(D, dtype)
     L = Xt.shape[1]
-    col_tissue = jnp.repeat(jnp.arange(3), L // 3)         # destination tissue of each column
-    a0_mat = jnp.asarray(a0_matrix(prior, L), dtype)       # persistence-aware Gamma shape [L,L]
+    alpha_pi = jnp.asarray(alpha_pi_matrix(prior, L), dtype)
 
-    n_patient = 0
-    if lik.dispersion == "patient":
-        if patient_idx is None:
-            raise ValueError("dispersion='patient' requires patient_idx (int array [J])")
-        patient_idx = jnp.asarray(patient_idx, jnp.int32)
-        n_patient = int(np.asarray(patient_idx).max()) + 1
-    else:
-        patient_idx = jnp.zeros(Xt.shape[0], jnp.int32)   # unused placeholder
-
-    kernel = NUTS(numpyro_model, target_accept_prob=cfg.target_accept)
+    kernel = NUTS(numpyro_model_factored, target_accept_prob=cfg.target_accept)
     mcmc = MCMC(kernel, num_warmup=cfg.num_warmup, num_samples=cfg.num_samples,
                 num_chains=cfg.num_chains, chain_method=cfg.chain_method,
                 progress_bar=cfg.progress_bar)
-    mcmc.run(jax.random.PRNGKey(cfg.seed), Xt, Yj, Dj, a0_mat, prior.b0,
-             lik.family, lik.dispersion, lik.alpha_scale, lik.sigma_scale,
-             col_tissue, patient_idx, n_patient, extra_fields=("diverging",))
+    mcmc.run(jax.random.PRNGKey(cfg.seed), Xt, Yj, Dj, alpha_pi,
+             prior.beta, prior.mu_g, prior.sigma_g, prior.sigma_phi, extra_fields=("diverging",))
 
     div = int(np.sum(jax.device_get(mcmc.get_extra_fields()["diverging"])))
     samples = mcmc.get_samples()
-    grouped = np.asarray(mcmc.get_samples(group_by_chain=True)["M"])   # [C, N, L, L]
-    diag = summary({"M": grouped}, group_by_chain=True)["M"]
-    flat = np.asarray(samples["M"])                                   # [C*N, L, L]
+    grouped = mcmc.get_samples(group_by_chain=True)
 
-    dispersion = None
-    if lik.family == "nb":
-        dispersion = {"mode": lik.dispersion,
-                      "params": {s: np.asarray(samples[s]) for s in _DISP_SITES[lik.dispersion]}}
+    # Convergence on the FREE sites (not the deterministic M): the funnel lives in the factor
+    # geometry. r_hat over all free sites; ESS over the identified block {g,pi,log_r} -- off-route
+    # Phi directions are prior-dominated and have intrinsically low ESS (not a mixing failure).
+    free = {k: np.asarray(grouped[k]) for k in ("g", "pi", "Phi", "log_r")}
+    diag = summary(free, group_by_chain=True)
+    # NaN-robust: numpyro's summary returns all-NaN r_hat/n_eff for a (near-)constant site
+    # (prior-dominated off-route pi/Phi columns can collapse). Flatten and guard the all-NaN case
+    # so the gate fails safe (inf r_hat / 0 ESS) rather than silently reporting NaN.
+    rhat_all = np.concatenate([np.asarray(diag[k]["r_hat"]).ravel() for k in free])
+    ess_all = np.concatenate([np.asarray(diag[k]["n_eff"]).ravel() for k in ("g", "pi", "log_r")])
+    r_hat_max = float(np.nanmax(rhat_all)) if np.isfinite(rhat_all).any() else float("inf")
+    ess_min = float(np.nanmin(ess_all)) if np.isfinite(ess_all).any() else 0.0
+
+    flat = np.asarray(samples["M"])                                    # [C*N, L, L]
+    factors = {k: np.asarray(samples[k]) for k in ("g", "pi", "Phi")}
+    dispersion = {"mode": "global", "params": {"log_r": np.asarray(samples["log_r"])}}
 
     return MCMCResult(
         samples=flat, M_hat=flat.mean(0), M_median=np.median(flat, 0), sd=flat.std(0),
-        num_divergences=div, r_hat_max=float(np.nanmax(diag["r_hat"])),
-        ess_min=float(np.nanmin(diag["n_eff"])), n_draws=flat.shape[0], dispersion=dispersion,
+        num_divergences=div, r_hat_max=r_hat_max, ess_min=ess_min,
+        n_draws=flat.shape[0], dispersion=dispersion, factors=factors,
     )

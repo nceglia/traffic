@@ -1,0 +1,773 @@
+\documentclass[11pt]{article}
+
+% ======================================================================
+%  Page geometry
+% ======================================================================
+\usepackage[a4paper,margin=1.1in]{geometry}
+
+% ======================================================================
+%  Math  (load AMS packages before the math font to avoid \Bbbk clash)
+% ======================================================================
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+
+% ======================================================================
+%  Fonts & typography  (Palatino-style text + matching math)
+% ======================================================================
+\usepackage[T1]{fontenc}
+\usepackage{newpxtext}
+\let\Bbbk\relax            % newpxmath redefines \Bbbk; avoid the clash
+\usepackage{newpxmath}
+\usepackage{bm}
+\usepackage{microtype}
+
+% ======================================================================
+%  Tables, lists, colour, boxes, links, headings
+% ======================================================================
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\graphicspath{{figures/}}
+\usepackage{xcolor}
+\usepackage[most]{tcolorbox}
+\usepackage{titlesec}
+\usepackage[colorlinks=true]{hyperref}
+
+\definecolor{accent}{HTML}{1F4E79}   % deep blue
+\definecolor{accentlt}{HTML}{2E74B5} % lighter blue
+\definecolor{boxbg}{HTML}{F2F6FB}    % pale blue box fill
+
+\hypersetup{
+  linkcolor=accent,
+  citecolor=accent,
+  urlcolor=accentlt,
+}
+
+% --- Coloured section headings ---
+\titleformat{\section}
+  {\normalfont\Large\bfseries\color{accent}}{\thesection}{0.7em}{}
+\titleformat{\subsection}
+  {\normalfont\large\bfseries\color{accentlt}}{\thesubsection}{0.6em}{}
+
+% --- Paragraph style: open, unindented ---
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.55em}
+
+% --- Highlighted "key result" box for the central equations ---
+\newtcolorbox{keybox}[1][]{
+  enhanced, breakable,
+  colback=boxbg, colframe=accent,
+  boxrule=0.6pt, arc=3pt,
+  left=10pt, right=10pt, top=8pt, bottom=8pt,
+  fonttitle=\bfseries, coltitle=white,
+  attach boxed title to top left={yshift=-2mm, xshift=4mm},
+  boxed title style={colback=accent, arc=2pt},
+  #1
+}
+
+% ======================================================================
+%  Notation macros
+% ======================================================================
+\newcommand{\Znn}{\mathbb{Z}_{\geq 0}}            % non-negative integers
+\newcommand{\Reals}{\mathbb{R}}
+\newcommand{\Zsp}{\mathcal{Z}}                    % joint state space
+\newcommand{\Ssp}{\mathcal{S}}                    % anatomical sites
+\newcommand{\Csp}{\mathcal{C}}                    % clonotype set
+\newcommand{\Rsp}{\mathcal{R}}                    % forward steps (source timepoints)
+\newcommand{\Dsp}{\mathcal{D}}                    % data
+\newcommand{\simplex}[1]{\Delta^{#1}}
+\newcommand{\Nsrc}{N^{\mathrm{src}}}
+\newcommand{\dsrc}{d^{\mathrm{src}}}
+\newcommand{\E}{\mathbb{E}}
+\DeclareMathOperator{\Dir}{Dirichlet}
+\DeclareMathOperator{\Pois}{Poisson}
+
+\theoremstyle{definition}
+\newtheorem*{remark}{Remark}
+
+% ======================================================================
+%  Title
+% ======================================================================
+\title{\bfseries\color{accent}\Large A Bayesian Population-Dynamics Model for
+Clonal T Cells\\[2pt] across Tissue and Phenotype in Glioblastoma}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+% ======================================================================
+\section{Setup}
+% ======================================================================
+
+We observe annotated T cells from multiple patients, anatomical sites, and
+study timepoints. Each observed cell carries five labels: a patient, a TCR
+clonotype, a study timepoint, an anatomical site, and a discrete T-cell
+phenotype state.
+
+The data are represented as aggregate
+clone-by-timepoint-by-site-by-phenotype counts, from which we construct
+clone-level observations across forward study steps.
+
+\subsection{Indices}
+
+We use the following indices throughout.
+\begin{itemize}[leftmargin=1.4em, itemsep=2pt]
+  \item Patients: $i = 1,\ldots,I$, with $I = 6$.
+  \item TCR clonotypes within patient $i$: $c = 1,\ldots,C_i$.
+  \item Shared study timepoints: $r \in \{1,\ldots,R\}$, ordered as
+        $\tau_1 < \tau_2 < \cdots < \tau_R$. The timepoint labels are
+        comparable across patients. Currently $R = 6$; the cohort is being
+        extended with additional timepoints.
+  \item Anatomical site: $s \in \Ssp$, with
+        $\Ssp = \{\mathrm{PBMC},\, \mathrm{CSF},\, \mathrm{Tumor}\}$; write
+        $S = |\Ssp| = 3$.
+  \item Annotated T-cell phenotype state: $k \in \{1,\ldots,K\}$. In the
+        current application $K = 13$, and all phenotypes share a single
+        phenotype space.
+\end{itemize}
+
+\subsection{Observed count tensor}
+
+For each patient $i$, clonotype $c$, timepoint $r$, site $s$, and phenotype
+$k$, let
+\[
+  Y_{icrsk} \in \Znn
+\]
+be the observed number of cells assigned to that combination: how many cells
+from patient $i$, clonotype $c$, and timepoint $r$ were sampled from site $s$
+and assigned phenotype $k$. Collecting the site and phenotype axes,
+\[
+  Y_{icr} \in \Znn^{\,|\Ssp| \times K}
+\]
+is the tissue-by-phenotype count tensor for clonotype $c$ in patient $i$ at
+timepoint $r$.
+
+Each tissue sample also carries a sequencing depth and a missingness flag. For
+patient $i$, timepoint $r$, and tissue $s$, let
+\[
+  d_{i,r,s} \in \Znn
+\]
+be the per-sample sequencing depth: the number of TCR$^+$ T cells in that
+$(\text{patient},\text{timepoint},\text{tissue})$ sample. It is the exposure used below. Let
+\[
+  m_{i,r,s} \in \{0,1\}
+\]
+be the missingness indicator, equal to $1$ when that sample was profiled and
+$0$ otherwise.
+
+\subsection{Joint tissue--phenotype state space}
+
+The model operates on the joint tissue--phenotype state space
+\[
+  \Zsp = \Ssp \times \{1,\ldots,K\},
+  \qquad
+  z = (s,k),
+\]
+where $s$ is the tissue and $k$ is the phenotype. Since $|\Ssp| = 3$ and
+$K = 13$, the number of joint states is
+\[
+  L \;=\; |\Zsp| \;=\; |\Ssp|\,K \;=\; 39 .
+\]
+The model therefore tracks clone counts across a $39$-state
+tissue--phenotype space. When describing transitions we write the source state
+as $z = (a,u)$ and the destination state as $z' = (b,v)$, where $a,b \in \Ssp$
+are source and destination tissues and $u,v \in \{1,\ldots,K\}$ are source and
+destination phenotypes.
+
+\subsection{Valid forward steps}
+
+Forward steps are defined per patient. For patient $i$, let
+$\Rsp_i \subseteq \{1,\ldots,R-1\}$ be the set of source timepoints at which
+patient $i$ has a valid forward step. We index a step by its source timepoint
+$r \in \Rsp_i$; the step runs from timepoint $r$ to the next sampled timepoint,
+written $r+1$. Thus $r$ is not a matrix index---it simply labels a forward step
+within patient $i$ by where it starts.
+
+\begin{remark}[Skipped timepoints]
+Writing the destination as $r+1$ assumes consecutive sampling. When a patient is
+missing a timepoint---so that, say, $T_1$ and $T_3$ are paired---$r+1$ should be
+read as the \emph{next available} timepoint for that patient. Which timepoints
+are paired is a data-preprocessing detail and does not change anything below.
+\end{remark}
+
+Each $r \in \Rsp_i$ is one observed forward step. Steps such as
+$T_1 \!\to\! T_2$, $T_2 \!\to\! T_3$, and $T_3 \!\to\! T_4$ are treated as
+repeated observations of the \emph{same} forward process: the mean matrix is
+shared across all patients and steps, and the indices $i$ and $r$ merely
+organize observations rather than selecting a separate matrix.
+
+\subsection{Clone-level observations within a step}
+
+Fix a patient $i$, a valid step $r \in \Rsp_i$, and a clonotype $c$ observed for
+that patient. The source and destination count vectors over the joint state
+space are read directly off the count tensor at timepoints $r$ and $r+1$,
+\[
+  x_{irc}(s,k) = Y_{i\, c\, r\, s\, k},
+  \qquad
+  y_{irc}(s,k) = Y_{i\, c\, (r+1)\, s\, k},
+  \qquad (s,k)\in\Zsp,
+\]
+so $x_{irc} \in \Znn^{L}$ and $y_{irc} \in \Znn^{L}$.
+
+The source enters the model as its depth-normalized composition. The
+\emph{depth-rescaled source}
+\[
+  \tilde{x}_{irc}(z) = \frac{x_{irc}(z)}{\dsrc_{ir,s}},
+  \qquad s = \mathrm{tissue}(z),
+  \qquad \dsrc_{ir,s} = d_{i,r,s},
+\]
+is the fraction of the source sample's TCR$^+$ T cells in bin $z$ (tissue
+$s = \mathrm{tissue}(z)$). The per-sample depth $d$ is retained rather than
+normalized away, so that an observed destination zero can be read as contraction
+or clonal loss where depth was high versus undersampling where depth was
+low---the separation the depth offset provides.
+
+We keep every clonotype with at least one cell at the source timepoint $r$,
+\[
+  \Csp_{ir}
+  =
+  \bigl\{\,
+    c \in \{1,\ldots,C_{i}\}
+    \;:\;
+    \Nsrc_{irc} > 0
+  \,\bigr\},
+  \qquad
+  \Nsrc_{irc} = \sum_{z\in\Zsp} x_{irc}(z) .
+\]
+A clone that is absent at the destination timepoint is kept: its absence is
+informative---contraction or clonal loss---not a reason to drop it. This gives
+the data hierarchy
+\[
+  i
+  \;\longrightarrow\;
+  r \in \Rsp_i
+  \;\longrightarrow\;
+  c \in \Csp_{ir},
+\]
+patients contain valid forward steps, and each forward step has a retained set
+of clonotypes present at the source timepoint. A \emph{clone-level forward
+observation} is the triple $(i,r,c)$; for compact notation we write
+\[
+  j \;\equiv\; (i,r,c),
+  \qquad
+  x_j = x_{irc},
+  \qquad
+  \tilde{x}_j = \tilde{x}_{irc},
+  \qquad
+  y_j = y_{irc} .
+\]
+
+Each destination state $z'$ carries the destination depth and missingness flag
+of its tissue $s' = \mathrm{tissue}(z')$:
+$d_{j,s'} = d_{i,\,r+1,\,s'}$ and $m_{j,s'} = m_{i,\,r+1,\,s'}$.
+
+\subsection{Two kinds of destination zero}
+
+Destination zeros are part of the likelihood specification, and the two kinds
+are treated differently.
+\begin{enumerate}[leftmargin=2em, itemsep=3pt]
+  \item \textbf{Missing sample} ($m_{j,s'} = 0$). The destination states in
+        tissue $s'$ were not profiled at the destination timepoint. They are
+        excluded from the likelihood entirely---masked out, never entered as a
+        zero count.
+  \item \textbf{Depth-zero} ($m_{j,s'} = 1$, clone not captured). A genuine
+        observed zero, modeled natively by the Negative-Binomial likelihood below: a small
+        mean $d_{j,s'}\,\mu_j(z')$ emits zero with positive probability while
+        $\mu_j(z') > 0$. No zero-inflation component is added.
+\end{enumerate}
+The depth-zero mechanism is what permits a clone to be absent at one step and
+present at the next.
+
+\subsection{Setup summary}
+
+The setup produces the clone-level forward observations
+\[
+  \Dsp = \bigl\{ (\tilde{x}_j,\, y_j,\, d_j,\, m_j,\, i_j,\, r_j,\, c_j) \bigr\}_{j=1}^{J},
+  \qquad j \equiv (i_j, r_j, c_j),
+\]
+each carrying a depth-rescaled source vector, a destination count vector, the
+per-tissue destination depths $d_j = (d_{j,s'})_{s'\in\Ssp}$ and missingness
+flags $m_j = (m_{j,s'})_{s'\in\Ssp}$, and a patient / step / clonotype identity.
+The count vectors live in the joint tissue--phenotype state space
+$\Zsp = \Ssp \times \{1,\ldots,K\}$, with $|\Zsp| = 39$.
+
+\subsection{Notation summary}
+
+Table~\ref{tab:notation} collects the core modeling symbols.
+
+\begin{table}[h]
+\centering
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Symbol} & \textbf{Meaning}\\
+\midrule
+$i = 1,\ldots,I$              & patient index\\
+$c = 1,\ldots,C_i$           & TCR clonotype within patient $i$\\
+$r \in \{1,\ldots,R\}$       & shared study timepoint, $\tau_1<\cdots<\tau_R$\\
+$s \in \Ssp$                 & anatomical site, $\Ssp=\{\mathrm{PBMC},\mathrm{CSF},\mathrm{Tumor}\}$\\
+$k \in \{1,\ldots,K\}$       & phenotype state ($K=13$)\\
+$z = (s,k) \in \Zsp$         & joint tissue--phenotype state ($L=|\Zsp|=39$)\\
+$Y_{icrsk}$                  & observed count tensor\\
+$d_{i,r,s}$                  & per-sample sequencing depth (count exposure)\\
+$m_{i,r,s} \in \{0,1\}$      & sample missingness indicator\\
+$\Rsp_i$                     & valid forward steps for patient $i$ ($\subseteq\{1,\ldots,R-1\}$)\\
+$r \in \Rsp_i$               & forward step, from source timepoint $r$ to $r+1$\\
+$\Csp_{ir}$                  & clonotypes present at the source timepoint of step $r$\\
+$j = (i_j,r_j,c_j)$          & clone-level observation, $j=1,\ldots,J$\\
+$x_j,\,y_j \in \Znn^{L}$     & source / destination count vectors\\
+$\tilde{x}_j$                & depth-rescaled source, $\tilde{x}_j(z)=x_j(z)/\dsrc_{ir,s}$\\
+$g_{a,u} \geq 0$             & per-source-state expansion factor (see Rmk.~\ref{rmk:anchor})\\
+$\pi_{(a,u)} \in \simplex{S-1}$ & destination-tissue distribution (trafficking)\\
+$\Phi_{(a,u),b} \in \simplex{K-1}$ & destination-phenotype distribution per route (switching)\\
+$M_{(a,u),(b,v)}=g\,\pi\,\Phi$ & assembled mean matrix $=\operatorname{diag}(g)T$ (free row sums)\\
+$T_{(a,u),(b,v)}=\pi\,\Phi$   & transition matrix, row-stochastic\\
+$g_z = \sum_{z'} M_{zz'}$    & row sum of $M$, equal to the expansion factor $g_{a,u}$\\
+$\mu_j = \tilde{x}_j M \in \Reals_{\geq 0}^{L}$ & destination intensity vector\\
+$\phi=\exp(\log\phi)$        & Negative-Binomial concentration\\
+$(\mu_g,\sigma_g,\alpha_a,\beta,\sigma_\phi)$ & prior hyperparameters (log-normal / Dirichlet / NB)\\
+$w_{jzz'}$                   & backward attribution probability\\
+$\rho^a(u)$                  & empirical source-cell phenotype distribution in tissue $a$ (pooled)\\
+$\theta(z)$                  & clone source composition, source cells as a distribution over states\\
+$\Dsp$                       & full dataset\\
+\bottomrule
+\end{tabular}
+\caption{Core modeling notation.}
+\label{tab:notation}
+\end{table}
+
+% ======================================================================
+\section{Joint Tissue--Phenotype Mean Matrix}
+% ======================================================================
+
+\label{sec:expansion-factors}
+
+The one-step forward operator is assembled from three interpretable factors,
+drawn per source state $z=(a,u)$, that separate the distinct biological processes
+it bundles---expansion, tissue trafficking, and phenotype switching:
+\begin{itemize}[leftmargin=1.4em, itemsep=2pt]
+  \item $g_{a,u} \geq 0$: the per-source-state \textbf{expansion factor}---per-cell
+        output over one step on the depth-normalized scale ($g>1$ expansion, $g<1$
+        contraction / clonal loss); not an absolute or cross-tissue fold-change
+        without an abundance anchor (Remark~\ref{rmk:anchor});
+  \item $\pi_{(a,u)} \in \simplex{S-1}$: the destination-\textbf{tissue}
+        distribution (\textbf{trafficking}), $\sum_{b\in\Ssp}\pi_{(a,u)}(b)=1$,
+        with $\pi_{(a,u)}(a)$ the retained (stay-in-tissue) share;
+  \item $\Phi_{(a,u),b}\in\simplex{K-1}$: the destination-\textbf{phenotype}
+        distribution along the route to tissue $b$ (\textbf{switching}),
+        $\sum_{v}\Phi_{(a,u),b}(v)=1$.
+\end{itemize}
+
+Assembling the factors gives the joint tissue--phenotype \emph{mean matrix}
+$M \in \Reals_{\geq 0}^{L\times L}$ ($L = 39$), whose rows are source states and
+whose columns are destination states:
+
+\begin{keybox}[title={Factored mean matrix}]
+\[
+  M_{(a,u),(b,v)}
+  \;=\;
+  g_{a,u}\;\cdot\;\pi_{(a,u)}(b)\;\cdot\;\Phi_{(a,u),b}(v).
+\]
+\end{keybox}
+
+For source state $z=(a,u)$ and destination $z'=(b,v)$, the entry $M_{zz'}$ is the
+expected number of destination-$z'$ cells produced per source-$z$ cell over one
+forward step,
+\[
+  M_{zz'}
+  =
+  \E[\,\text{cells in state } (b,v) \text{ at } r+1
+        \text{ per cell in state } (a,u) \text{ at } r\,],
+\]
+and its rows are not constrained to sum to one---the row sum $g_z$ is freed to
+carry expansion (a depth-normalized, not absolute cross-tissue, fold-change;
+Remark~\ref{rmk:anchor}). Equivalently
+$M=\operatorname{diag}(g)\,T$ with the row-stochastic
+transition matrix
+\[
+  T_{(a,u),(b,v)} = \pi_{(a,u)}(b)\,\Phi_{(a,u),b}(v),
+  \qquad
+  g_z = \sum_{z'} M_{zz'} ,
+\]
+so the row sum recovers the expansion factor ($g_z = g_{a,u}$), $\pi_{(a,u)}$ is the
+destination-tissue \emph{marginal} of the transition row, and $\Phi_{(a,u),b}$ its
+destination-phenotype \emph{conditional} given the destination tissue.
+
+On the interior where $g_z>0$ and $\pi_{(a,u)}(b)>0$ for every $b$, this is an
+\emph{exact reparameterization}: each transition row equals its tissue marginal
+times its phenotype conditional. Where a route carries no mass
+($\pi_{(a,u)}(b)\to 0$), the corresponding switching factor $\Phi_{(a,u),b}$ is
+not identified by the data and reverts to its prior
+(Section~\ref{sec:posterior-sampling}). The construction serves to (i) place
+biologically appropriate, \emph{separate} priors on expansion, trafficking, and
+switching (Section~\ref{sec:priors})---in particular a persistence-favouring
+trafficking prior---and (ii) expose these quantities as first-class parameters.
+A conservative (non-expanding) model is the special case $g_z\equiv 1$.
+
+\begin{remark}[Cross-tissue comparison of expansion]
+\label{rmk:anchor}
+The expansion factor $g_{a,u}$ is estimated on the depth-normalized scale---the
+source enters as $\tilde{x}=x/\dsrc$ (each clone's cells divided by its tissue
+sample's sequencing depth) and destination counts are scaled by $d^{\mathrm{dst}}$---so
+$g$ measures per-cell output on a per-sample-depth basis, not an absolute cell-count
+fold-change. Because those depths differ systematically across tissues, $g$ is
+comparable across states within a source tissue but not across tissues: an apparent
+cross-tissue difference in $g$ can reflect the tissues' differing depth regimes rather
+than true proliferation. Recovering an absolute, cross-tissue fold-change needs an
+\emph{abundance anchor} (per-sample total T-cell counts, cellularity, or a spike-in),
+which we plan to add; like the missing-timepoint handling, this is a stated scope
+limit, not a change to the model.
+\end{remark}
+
+\subsection{Destination intensity vector}
+\label{sec:intensity}
+
+For observation $j$ with depth-rescaled source $\tilde{x}_j$, the destination
+\emph{intensity vector} is the pushforward of $\tilde{x}_j$ through $M$:
+
+\begin{keybox}[title={Destination intensity}]
+\[
+  \mu_j = \tilde{x}_j M \in \Reals_{\geq 0}^{L},
+  \qquad\text{equivalently}\qquad
+  \mu_j(z')
+  =
+  \sum_{z\in\Zsp} \tilde{x}_j(z)\, M_{zz'} .
+\]
+\end{keybox}
+
+The expected destination count in state $z'$ scales the intensity by the
+destination depth of its tissue,
+\[
+  \E\!\left[ y_j(z') \mid M \right] = d_{j,s'}\, \mu_j(z'),
+  \qquad s' = \mathrm{tissue}(z') .
+\]
+There is no simplex constraint on $\mu_j$ and no conditioning on a destination
+total.
+
+\subsection{Role of forward steps}
+
+The same matrix $M$ is used for every patient $i$ and step $r \in \Rsp_i$. The
+pair $(i,r)$ selects which source and destination vectors to build, not a
+different matrix; all steps are repeated observations of a common one-step
+forward process.
+
+% ======================================================================
+\section{Bayesian Treatment of the Mean Matrix}
+% ======================================================================
+
+The matrix $M$ is a latent non-negative kernel of per-cell destination
+intensities over the joint tissue--phenotype state space.
+
+\subsection{Forward generative reading}
+
+Read forward, the additive mean structure follows from Poisson superposition.
+Treating the depth-rescaled source as a population with $\tilde{x}_j(z)$ cells in
+each state $z$, and letting each source cell in state $z$ contribute on average
+$M_{zz'}$ cells to destination $z'$, the contributions sum across source states
+and, scaled by the destination depth, give the expected destination count
+\[
+  \E\!\left[ y_j(z') \mid M \right]
+  =
+  d_{j,s'} \sum_{z\in\Zsp} \tilde{x}_j(z)\, M_{zz'}
+  =
+  d_{j,s'}\, \mu_j(z') ,
+\]
+the pushforward intensity of Section~\ref{sec:intensity}. This motivates the mean
+structure; we do not take the Poisson as the emission law. Destination counts are
+overdispersed relative to a Poisson---rate varies across clones and destination
+states---so they are modelled with a Negative-Binomial whose mean is this
+superposition mean and whose additional variance is a phenomenological
+overdispersion term rather than a per-cell counting process
+(Section~\ref{sec:likelihood}).
+
+\subsection{Likelihood for destination counts}
+\label{sec:likelihood}
+
+\begin{keybox}[title={Observation likelihood}]
+\[
+  y_j(z') \;\sim\; \operatorname{NB2}\!\bigl( d_{j,s'}\, \mu_j(z'),\; \phi \bigr),
+  \qquad s' = \mathrm{tissue}(z'),
+\]
+the Negative-Binomial in mean--concentration form: mean $d_{j,s'}\mu_j(z')$ and
+variance $d_{j,s'}\mu_j(z') + \bigl(d_{j,s'}\mu_j(z')\bigr)^2 / \phi$, evaluated only
+at destination states whose tissue is non-missing ($m_{j,s'} = 1$). The Poisson
+superposition above is the overdispersion-free limit $\phi\to\infty$; the extra
+term $\bigl(d_{j,s'}\mu_j(z')\bigr)^2/\phi$ absorbs overdispersion (rate variation)
+beyond counting noise. The concentration $\phi=\exp(\log\phi)$ carries a log-scale
+Normal prior and is a single global parameter, shared across all destination
+states, patients, and steps. The latent matrix enters only through the intensity
+$\mu_j$ (Section~\ref{sec:intensity}).
+\end{keybox}
+
+\subsection{Priors over the factors}
+\label{sec:priors}
+
+Priors are placed on the three factors of Section~\ref{sec:expansion-factors},
+not on the $M$-entries, so each process carries a prior matched to its biology:
+\[
+  g_{a,u} \sim \operatorname{LogNormal}\!\bigl(\mu_g,\sigma_g^2\bigr),
+  \qquad
+  \pi_{(a,u)} \sim \Dir\!\bigl(\alpha_a\bigr),
+  \qquad
+  \Phi_{(a,u),b} \sim \Dir\!\bigl(\beta\bigr),
+\]
+each drawn independently over source states (and, for $\Phi$, destination
+tissues), shared across all patients and steps; the Negative-Binomial
+concentration has $\log\phi \sim \mathcal{N}(0,\sigma_\phi^2)$.
+\begin{itemize}[leftmargin=1.4em, itemsep=2pt]
+  \item \textbf{Expansion} $g_{a,u}$: a log-normal centred near unit expansion
+        ($\mu_g\approx 0$) with a heavy right tail, so large expanders are not
+        shrunk the way an exponential-tailed Gamma shrinks them.
+  \item \textbf{Trafficking} $\pi_{(a,u)}$: a \emph{persistence-favouring}
+        Dirichlet---the concentration vector $\alpha_a$ gives the source tissue
+        ($b=a$) larger mass than the off-tissue destinations, so a priori a
+        clone's descendants are expected to \emph{stay} rather than scatter. The
+        concentration is indexed by source tissue $a$, so the stay mass can differ
+        per tissue (e.g.\ a lower stay for CSF as a transit compartment).
+  \item \textbf{Switching} $\Phi_{(a,u),b}$: a \emph{symmetric} Dirichlet over
+        destination phenotypes ($\beta$ constant), with no a priori preference among
+        fates---unlike trafficking, phenotype persistence is left to the data.
+\end{itemize}
+
+\begin{remark}[Why factored priors]
+Placing priors on the factors states the model's biological expectations in the
+same coordinates as its read-outs: the persistence-favouring $\Dir(\alpha_a)$ puts
+prior mass on a clone's descendants remaining in the source tissue, and the
+log-normal centres per-state expansion at unity ($g\approx 1$) with a heavy right
+tail so large expanders are not shrunk.
+\end{remark}
+
+\begin{remark}[Support restrictions are an implementation detail]
+The implementation may exclude biologically implausible transitions by removing
+the corresponding destinations from the relevant $\pi$ or $\Phi$ support. This
+sparsifies $M$ without changing the form of the model; sums over destination
+states below are read over the retained support. The likelihood-support guard is
+unchanged: every non-missing destination $z'$ with $y_j(z')>0$ must be reachable
+($M_{zz'}>0$) from some source state in the support of $\tilde{x}_j$.
+\end{remark}
+
+\subsection{Posterior predictive destination counts}
+
+Because $M$ is latent, the intensity $\mu_j = \tilde{x}_j M$ is also uncertain.
+Posterior draws of $M$ induce replicated destination counts
+\[
+  y_j^{\mathrm{rep}}(z') \;\sim\; \operatorname{NB2}\!\bigl( d_{j,s'}\, \mu_j(z'),\; \phi \bigr)
+\]
+over destination states with $m_{j,s'} = 1$.
+
+\subsection{Backward attribution}
+\label{sec:backward}
+
+The reverse question---which source state produced an observed destination
+cell---is a posterior attribution. For observation $j$,
+\[
+  w_{jzz'}
+  =
+  \frac{\tilde{x}_j(z)\, M_{zz'}}
+       {\sum_{\tilde z\in\Zsp} \tilde{x}_j(\tilde z)\, M_{\tilde z z'}}
+  =
+  \frac{\tilde{x}_j(z)\, M_{zz'}}{\mu_j(z')} ,
+\]
+the same form as the forward intensity with source and destination roles
+reversed. Being a function of $M$, it is a posterior read-out: evaluated at the
+fitted $\widehat{M}$, or per draw to carry uncertainty, it attributes observed
+destination cells back to their likely sources.
+
+% ======================================================================
+\section{Full Generative Story}
+\label{sec:generative}
+% ======================================================================
+
+The full model is a model for the one-step expansion and redistribution of clone
+mass across tissue--phenotype states. It can be summarized as follows.
+
+\begin{keybox}[title={Generative model}]
+The state space $\Zsp$ ($|\Zsp| = L$) and the fixed inputs---each observation's
+depth-rescaled source $\tilde{x}_j$, the destination depths $d_{j,s'}$, and the
+missingness flags $m_{j,s'}$---are given. The model generates the destination
+counts as follows.
+\begin{enumerate}[leftmargin=2em, itemsep=4pt]
+  \item \textbf{Operator factors.} For each source state $z=(a,u)$, draw
+        independently the expansion, trafficking, and switching factors
+        \[
+          g_{a,u} \sim \operatorname{LogNormal}(\mu_g,\sigma_g^2),
+          \quad
+          \pi_{(a,u)} \sim \Dir(\alpha_a),
+          \quad
+          \Phi_{(a,u),b} \sim \Dir(\beta)\ \ (b\in\Ssp),
+        \]
+        and the dispersion $\log\phi \sim \mathcal{N}(0,\sigma_\phi^2)$; assemble the
+        mean matrix
+        $M_{(a,u),(b,v)} = g_{a,u}\,\pi_{(a,u)}(b)\,\Phi_{(a,u),b}(v)$, shared
+        across all patients and steps.
+
+  \item \textbf{Observation.} For each observation $j = (i,r,c)$, push the source
+        forward to the intensity $\mu_j = \tilde{x}_j M$, and for each destination
+        state $z'$ with $m_{j,s'} = 1$, draw
+        \[
+          y_j(z') \;\sim\; \operatorname{NB2}\!\bigl( d_{j,s'}\, \mu_j(z'),\; \phi \bigr),
+          \qquad s' = \mathrm{tissue}(z') .
+        \]
+\end{enumerate}
+\end{keybox}
+
+The dependency structure is shown in Figure~\ref{fig:plate}.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.78\linewidth]{plate_joint_transition.pdf}
+
+  \smallskip
+  {\small
+  \begin{tabular}{@{}ll@{}}
+    \toprule
+    \textbf{Node} & \textbf{Meaning}\\
+    \midrule
+    $x_{irc}$ & observed source counts at the start of the step (over the $L$ states)\\
+    $\tilde{x}_{irc}=x_{irc}/\dsrc_{ir,s}$ & depth-rescaled source (deterministic; folded into the $x\!\to\!y$ edge)\\
+    $y_{irc}$ & observed destination counts in tissue $s$ at the end of the step\\
+    $g_{z}$ & latent expansion factor per source state (log-normal)\\
+    $\pi_{(a,u)}$ & latent destination-tissue distribution --- trafficking (Dirichlet)\\
+    $\Phi_{(a,u),b}$ & latent destination-phenotype distribution per route --- switching (Dirichlet)\\
+    $M_{(a,u),(b,v)}=g\,\pi\,\Phi$ & assembled mean matrix, shared across all patients and steps\\
+    $\phi$ & Negative-Binomial concentration (log-Normal)\\
+    $d_{irs}$ & destination sequencing depth, exposure (fixed)\\
+    $(\mu_g,\sigma_g,\alpha_a,\beta,\sigma_\phi)$ & prior hyperparameters (fixed)\\
+    \bottomrule
+  \end{tabular}}
+
+  \caption{Plate diagram of the generative model (node key above). The operator
+    factors---expansion $g_z$, trafficking $\pi_{(a,u)}$, and switching
+    $\Phi_{(a,u),b}$---are drawn once per source state from their priors and
+    assembled into
+    $M_{(a,u),(b,v)}=g_{a,u}\,\pi_{(a,u)}(b)\,\Phi_{(a,u),b}(v)$; this block sits
+    \emph{outside} the patient plate, so a single $M$ (and dispersion $\phi$) is
+    shared across all patients and steps. The observation side nests patient $i$,
+    step $r\in\Rsp_i$, clone $c\in\Csp_{ir}$, and tissue $s\in\Ssp$. The
+    depth-rescaled source $\tilde{x}_{irc}$ is pushed through $M$ to the intensity
+    $\mu_{irc}=\tilde{x}_{irc}M$, and each destination count $y_{irc}$ is a
+    Negative-Binomial draw with mean $d_{irs}\,\mu_{irc}$ and concentration $\phi$,
+    evaluated only at non-missing tissues (masking is a support restriction, not a
+    drawn node). Double circles ($x_{irc}$, $y_{irc}$) mark observed quantities;
+    solid dots (prior hyperparameters, $d_{irs}$) mark fixed inputs; the
+    depth-rescaling $\tilde{x}_{irc}=\mathrm{Rescale}(x_{irc})$ is folded into the
+    $x\!\to\!y$ edge.}
+  \label{fig:plate}
+\end{figure}
+
+% ======================================================================
+\section{Inference}
+% ======================================================================
+
+Inference estimates the posterior over the shared mean matrix $M$. The
+observed data are the clone-level forward observations $\Dsp$; the depth-rescaled
+sources $\tilde{x}_j$, the depths $d_{j,s'}$, and the missingness flags
+$m_{j,s'}$ are fixed inputs, as are the prior hyperparameters
+$(\mu_g,\sigma_g,\alpha_a,\beta,\sigma_\phi)$.
+
+\subsection{Learned quantity}
+
+The main learned object is the posterior $p(M \mid \Dsp)$. A single-entry
+summary is
+\[
+  \E\!\left[ M_{(a,u),(b,v)} \mid \Dsp \right],
+\]
+the posterior mean number of destination-$(b,v)$ cells produced per
+source-$(a,u)$ cell over one forward step.
+
+\subsection{Posterior sampling}
+\label{sec:posterior-sampling}
+
+The posterior is not available in closed form. The unknowns are the operator
+factors $\{g_{a,u},\,\pi_{(a,u)},\,\Phi_{(a,u),b}\}$ and the dispersion $\log\phi$;
+the mean matrix $M_{(a,u),(b,v)}=g_{a,u}\pi_{(a,u)}(b)\Phi_{(a,u),b}(v)$ and the
+intensities $\mu_j=\tilde{x}_j M$ are deterministic functions of them, and the
+mean--concentration Negative-Binomial is written directly on the aggregated
+destination counts, so no auxiliary allocation variables are introduced. We draw
+$\{g,\pi,\Phi,\log\phi\}^{(1)},\ldots,\{g,\pi,\Phi,\log\phi\}^{(N)}$ by gradient-based
+Markov chain Monte Carlo (NUTS) in the unconstrained reparameterization---positive
+$g$ through a log transform, the simplices $\pi,\Phi$ through their standard
+bijections. The log-posterior is smooth: the intensity is linear in $M$ and $M$ is
+a smooth product of the factors, and the log-normal, Dirichlet, and
+Negative-Binomial densities are smooth on their supports. Each $\Phi_{(a,u),b}$
+enters the likelihood only through the trafficking mass $\pi_{(a,u)}(b)$ routed to
+tissue $b$, so off-route switching factors (small $\pi_{(a,u)}(b)$) are only weakly
+informed and prior-dominated; the proper Dirichlet priors keep these directions
+well-behaved.
+
+\subsection{Estimated mean matrix and uncertainty}
+
+The fitted mean matrix is the posterior mean $\widehat{M} = \E[M \mid \Dsp]$,
+estimated by the sample average $\tfrac{1}{N}\sum_{n} M^{(n)}$ over the $N$ draws; its row sums are
+free---$\widehat{M}$ is not normalized across destinations. Credible intervals
+for any entry follow from the sample quantiles. Every read-out below is a
+deterministic function of $M$, so evaluating it on each draw $M^{(n)}$ yields its
+full posterior, summarized by a posterior mean and credible interval.
+
+% ======================================================================
+\section{Posterior Summaries}
+% ======================================================================
+
+The fitted $\widehat{M}$ yields, for any source tissue and phenotype, three
+per-step quantities---where a clone's mass traffics across tissues, whether it
+expands or contracts, and how its phenotype mix reshapes---each a dimensionless
+fraction or factor over one step, not a per-time rate.
+
+Define $\rho^a(u)$ as the empirical source-cell phenotype distribution in tissue
+$a$, pooled across clones and steps; it collapses source phenotypes in the
+tissue-level rows below.
+
+\begin{table}[h]
+\centering
+\small
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{@{}p{2.15cm}p{2.35cm}p{3.2cm}p{5.3cm}@{}}
+\toprule
+\textbf{Quantity} & \textbf{Grain} & \textbf{Reads as} & \textbf{Expression}\\
+\midrule
+Traffic (resolved)
+  & (tissue, phenotype) $\to$ tissue
+  & fraction of mass, per step
+  & $\pi_{(a,u)}(b)$\\
+Traffic (collapsed)
+  & tissue $\to$ tissue
+  & fraction of mass, per step
+  & $\sum_{u}\rho^a(u)\,\pi_{(a,u)}(b)$\\
+Traffic rate
+  & tissue
+  & retention vs.\ out, per step
+  & stay $=\pi_{(a,u)}(a)$, out $=\sum_{b\neq a}\pi_{(a,u)}(b)$; sum to $1$\\
+Expansion factor
+  & (tissue, phenotype)
+  & per-cell output, per step ($>1$ expand, $<1$ contract; Rmk.~\ref{rmk:anchor})
+  & $g_{a,u}=\sum_{z'}\widehat{M}_{(a,u),z'}$\\
+Clone expansion
+  & clone
+  & clone-mean over source states
+  & $\sum_{z}\theta(z)\,g_z$\\
+Switching (resolved)
+  & (tissue, phenotype) $\to$ tissue
+  & phenotype distribution, per step
+  & $\Phi_{(a,u),b}(v)$\\
+Switching (collapsed)
+  & tissue $\to$ tissue
+  & phenotype distribution, per step
+  & $\sum_{u}\rho^a(u)\,\Phi_{(a,u),b}(v)$\\
+Switch rate
+  & tissue route
+  & switched vs.\ kept, per step
+  & switched $=\sum_{v\neq u}\Phi_{(a,u),b}(v)$, kept $=\Phi_{(a,u),b}(u)$\\
+\bottomrule
+\end{tabular}
+\caption{Per-step read-outs of the fitted mean matrix $\widehat{M}$.}
+\label{tab:readouts}
+\end{table}
+
+The resolved read-outs are the model's own factors---trafficking $\pi_{(a,u)}$,
+switching $\Phi_{(a,u),b}$, and the expansion factor $g_{a,u}$
+(Section~\ref{sec:expansion-factors})---read \emph{directly}, each with its own
+posterior mean and credible interval; the collapsed read-outs are their
+$\rho^a$-weighted tissue aggregates. $\theta(z)$ is a clone's source
+composition---its source cells as a distribution over states.
+
+\end{document}

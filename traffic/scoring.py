@@ -44,31 +44,20 @@ _EPS = 1e-12
 # --------------------------------------------------------------------------- #
 # dispersion: per-draw concentration r over the L destination columns
 # --------------------------------------------------------------------------- #
-def _r_per_col(fit, idx, ss, patient_idx=None):
+def _r_per_col(fit, idx, ss):
     """Concentration r for each posterior draw, broadcast to [n_draws, L].
 
-    Returns r evaluated on the subset of draws `idx`. For the `patient` mode the
-    held-out patient has no fitted effect, so we fall back to the population mean
-    (eps=0) -- flagged by the caller.
+    The factored model carries a single GLOBAL NB2 concentration (site log_r); a
+    fit with no dispersion is Poisson (r -> inf). Evaluated on the draw subset `idx`.
     """
-    L, K = ss.L, ss.K
-    col_tissue = np.repeat(np.arange(ss.S), K)          # [L] destination tissue
+    L = ss.L
     disp = fit.dispersion
     if disp is None:                                    # Poisson -> r = inf
         return np.full((len(idx), L), np.inf)
-    mode = disp["mode"]
-    p = disp["params"]
-    if mode == "global":
-        r = np.exp(np.asarray(p["log_r"])[idx])[:, None]        # [n,1]
-        return np.broadcast_to(r, (len(idx), L)).copy()
-    if mode == "tissue":
-        log_r_s = np.asarray(p["log_r_s"])[idx]                 # [n,3]
-        return np.exp(log_r_s)[:, col_tissue]                   # [n,L]
-    if mode == "patient":
-        mu_s = np.asarray(p["mu_s"])[idx]                       # [n,3]
-        # population-level (eps=0); per-patient effect unavailable out-of-sample
-        return np.exp(mu_s)[:, col_tissue]                      # [n,L]
-    raise ValueError(f"unknown dispersion mode {mode!r}")
+    if disp["mode"] != "global":
+        raise ValueError(f"unknown dispersion mode {disp['mode']!r}")
+    r = np.exp(np.asarray(disp["params"]["log_r"])[idx])[:, None]   # [n,1]
+    return np.broadcast_to(r, (len(idx), L)).copy()
 
 
 # --------------------------------------------------------------------------- #
