@@ -4,7 +4,7 @@ Negative-Binomial likelihood (JAX + NumPyro / NUTS).
 
 Executable form of docs/model_methods.tex.
 """
-from . import model, simulate, statespace
+from . import model, recovery, sbc, simulate, statespace
 from .config import FactoredPriorConfig, MCMCConfig
 from .statespace import StateSpace
 from .statespace import default as default_statespace
@@ -12,7 +12,7 @@ from .statespace import default as default_statespace
 __all__ = [
     "StateSpace", "default_statespace",
     "FactoredPriorConfig", "MCMCConfig",
-    "model", "simulate", "statespace",
+    "model", "recovery", "sbc", "simulate", "statespace",
 ]
 
 # Optional modules (import lazily to keep the core light).
