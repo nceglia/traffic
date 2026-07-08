@@ -117,7 +117,7 @@ def main():
     surv = m["surv"]
 
     # per-clone tissue marginals (counts) + source tissue
-    src_tis = Xt.reshape(J, S, K).sum(2).argmax(1)
+    src_tis = obs.src_tissue   # raw-count attribution (not Xtilde); see docs/DATA.md
     obs_tm = Yt.reshape(J, S, K).sum(2)                 # [J,S] observed dest tissue counts
     prd_tm = mean_model.reshape(J, S, K).sum(2)         # [J,S] predicted
     n_src = obs.n_src.astype(int)

@@ -91,7 +91,7 @@ def main():
     c = decompose_prediction(Xt, Y, D, mean_pooled, ss, phi)
 
     # ---- within-(source)-tissue phenotype composition, per clone ------------------
-    src_tis = Xt.reshape(J, S, K).sum(2).argmax(1)                 # dominant source tissue
+    src_tis = obs.src_tissue                 # dominant source tissue (raw-count; see docs/DATA.md)
     aj = np.arange(J)
 
     def block(arr):

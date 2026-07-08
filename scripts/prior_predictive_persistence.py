@@ -39,7 +39,7 @@ def main():
     fit = io.load_fit(fit_path)
     Xt, Y, D = obs.Xtilde, obs.Y, obs.D; J = Xt.shape[0]
     obsv = D > 0; Yt = np.where(obsv, Y, 0.0)
-    src_tis = Xt.reshape(J, S, K).sum(2).argmax(1)
+    src_tis = obs.src_tissue   # raw-count attribution (not Xtilde); see docs/DATA.md
     Xr = obs.X.reshape(J, S, K).sum(0); rho = Xr / np.maximum(Xr.sum(1, keepdims=True), 1e-12)
 
     # DATA-WEIGHTED prediction persistence (matches the source-conditioned PPC): aggregate the

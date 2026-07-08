@@ -44,6 +44,17 @@ class Observations:
         """Clone source composition (raw source normalized to a distribution), [J, L]."""
         return self.X / np.maximum(self.X.sum(1, keepdims=True), 1e-12)
 
+    @property
+    def src_tissue(self):
+        """[J] dominant source tissue per clone-step, from RAW counts (argmax over tissue blocks).
+
+        The canonical source-tissue label for every source-conditioned read-out. Uses raw X,
+        NOT the depth-rescaled Xtilde: rescaling by source depth up-weights shallowly-sampled
+        tissues (notably CSF) and spuriously reassigns small multi-tissue clones to them.
+        See docs/DATA.md ("Source-tissue attribution").
+        """
+        return source_tissue(self.X, self.ss)
+
 
 def load_obs_table(h5ad_path, *, backed=True):
     """Return a DataFrame of the obs columns the model needs (TCR+ rows only)."""
@@ -70,6 +81,22 @@ def phenotype_dist_by_tissue(obs_df, ss: StateSpace) -> np.ndarray:
             rho[ss.tissues.index(t), ss.phenotypes.index(p)] += n
     rho = rho / np.maximum(rho.sum(1, keepdims=True), 1)
     return rho
+
+
+def source_tissue(X, ss: StateSpace = None) -> np.ndarray:
+    """Dominant source tissue index per clone-step from RAW counts X [J, L] -> [J].
+
+    Attribution uses raw cell counts, NOT the depth-rescaled Xtilde. Dividing by the source
+    sequencing depth up-weights shallowly-sampled tissues (notably CSF), which spuriously
+    reassigns small multi-tissue clones to the shallow tissue and inflates its apparent
+    out-migration. This helper is the single source of truth for the source-tissue label used
+    by all source-conditioned read-outs (traffic matrices, migration/switching validation, the
+    PPC). See docs/DATA.md ("Source-tissue attribution"). For a stricter label, threshold on the
+    source purity X_tissue / X_total instead of argmax.
+    """
+    ss = ss or default_ss()
+    X = np.asarray(X)
+    return X.reshape(X.shape[0], ss.S, ss.K).sum(2).argmax(1)
 
 
 def build(obs_df, ss: StateSpace = None, *, min_src_cells: int = 1) -> Observations:

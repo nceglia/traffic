@@ -93,7 +93,7 @@ def main():
     surv = m["surv"]; prof = m["prof_src"]
     patient = np.asarray(obs.patient); pat_order = sorted(set(patient.tolist()))
     n_src = obs.n_src.astype(int); abin = np.array([abundance_bin(n) for n in n_src])
-    src_tis = Xt.reshape(J, S, K).sum(2).argmax(1)
+    src_tis = obs.src_tissue   # raw-count attribution (not Xtilde); see docs/DATA.md
 
     # movers (composition axes score only where the behaviour occurs)
     src_t = obs.X.reshape(J, S, K).sum(2); src_t = src_t / np.maximum(src_t.sum(1, keepdims=True), 1e-12)

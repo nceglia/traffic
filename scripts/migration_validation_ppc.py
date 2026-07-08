@@ -52,7 +52,7 @@ def main():
     Xt, Y, D = obs.Xtilde, obs.Y, obs.D; J = Xt.shape[0]
     phi = float(np.exp(np.asarray(fit.dispersion["params"]["log_r"]).mean())) if fit.dispersion else np.inf
     obsv = D > 0; Yt = np.where(obsv, Y, 0.0)
-    src_tis = Xt.reshape(J, S, K).sum(2).argmax(1)
+    src_tis = obs.src_tissue   # raw-count attribution (not Xtilde); see docs/DATA.md
     idx = np.sort(RNG.choice(fit.samples.shape[0], min(ndraw, fit.samples.shape[0]), replace=False))
     print(f"J={J} phi={phi:.3f} reps={n_rep} draws={len(idx)}")
 

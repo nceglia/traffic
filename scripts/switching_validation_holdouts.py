@@ -47,7 +47,7 @@ def _switch_skill_auc(fit_h, obs, ss, mask, phi_h):
     m = decompose_prediction(Xt, Y, D, mean_h, ss, phi_h)
     c = decompose_prediction(Xt, Y, D, mean_pl, ss, phi_h)
 
-    src_tis = Xt.reshape(Jh, S, K).sum(2).argmax(1)
+    src_tis = obs.src_tissue[mask]   # raw-count attribution (not Xtilde); see docs/DATA.md
     blk = lambda A: A.reshape(Jh, S, K)[aj, src_tis, :]
     src_cnt = obs.X[mask].reshape(Jh, S, K)[aj, src_tis, :]
     obs_ph, prd_ph = blk(Yt), blk(mean_h)

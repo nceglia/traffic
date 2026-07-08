@@ -86,7 +86,7 @@ def main():
     pi = Yt.sum(0); pi = pi / max(pi.sum(), 1e-12)
     patient = np.asarray(obs.patient)
     n_src = obs.n_src.astype(int); abin = np.array([abundance_bin(n) for n in n_src])
-    src_tis = Xt.reshape(J, S, K).sum(2).argmax(1)
+    src_tis = obs.src_tissue   # raw-count attribution (not Xtilde); see docs/DATA.md
     idx = np.sort(RNG.choice(fit.samples.shape[0], min(ndraw, fit.samples.shape[0]), replace=False))
 
     mean_model = np.where(obsv, D * (Xt @ fit.M_hat), 0.0)

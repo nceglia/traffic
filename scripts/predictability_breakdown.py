@@ -111,7 +111,7 @@ def decompose_prediction(Xt, Y, D, mean, ss, phi):
     # comparison; standardizing by the NB sd makes it depth-calibrated; keeping extinct clones
     # (no `surv` filter -- only "source tissue profiled") removes the recapture selection that
     # made the old survivor-conditioned |log-ratio| slope with depth even when the fit is fine.
-    src_tis = Xt.reshape(J, S, K).sum(2).argmax(1)         # [J] dominant source tissue
+    src_tis = obs.src_tissue         # [J] dominant source tissue (raw-count; see docs/DATA.md)
     prof_src = (D.reshape(J, S, K).sum(2) > 0)[np.arange(J), src_tis]   # source tissue sequenced at t+1
     pred_s = Mt_tis[np.arange(J), src_tis]                 # predicted dest count in source tissue
     obs_s = Yt_tis[np.arange(J), src_tis]                  # observed  dest count in source tissue

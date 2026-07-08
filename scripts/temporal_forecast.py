@@ -18,6 +18,50 @@ Panels:
 
 Env: FIT_TEMPORAL (npz, default temporal_Mr.npz), TRAFFIC_H5 (required, for the T1 start),
      OUTDIR (default .), HORIZON (forecast steps past T6, default 12)
+
+=============================================================================
+NOTES / ANALYSIS LOG  (append findings + caveats here; newest on top)
+-----------------------------------------------------------------------------
+2026-07-02  (first run: temporal_Mr.npz, 39-state putative, nb-global, 5 transitions
+             T1->T2 .. T5->T6; production fits r_hat<=1.004, 0 divergences, 400 draws)
+
+  Two DIFFERENT stabilizations -- keep them separate:
+    - COMPOSITION (state) stabilization = where the population sits. Panel C
+      (distance-to-equilibrium) is a CLEAN, smooth curve: TV to steady falls
+      0.585 -> 0.51 -> 0.31 -> 0.12 -> 0.33 -> 0.065 across T1..T6, then converges
+      to ~0 and holds. Essentially settled by T6 (10% of start reached ~1 step past
+      T6; redistribution mixes fast, |lambda2(T)| ~ 0.3-0.5). This IS forecastable.
+    - OPERATOR / RATE stabilization = do the trafficking RULES stop changing. Still
+      IN PROGRESS: consecutive drift JS(T_r,T_{r+1}) falls 0.21 -> 0.10 but is not
+      flat. The per-transition mask-fraction metrics (migration 0.72,0.72,0.79,0.81,
+      0.74; switching U-shaped) are NON-monotone -- do NOT extrapolate a smooth
+      asymptote from 5 points. Needs the incoming extra timepoints (~11 transitions).
+
+  The T4->T5 wobble in panel C is NOT measurement noise: it is residual operator
+  drift -- the T4->T5 operator briefly pushes the composition away from the eventual
+  fixed point, T5->T6 pulls it back. Same signal as the drift panel.
+
+  Forecast steady-state tissue occupancy (SHARE space): PBMC 0.12, CSF 0.76, TP 0.12.
+  CAVEAT: this is the row-stochastic redistribution operator's stationary SHARE
+  distribution -- where surviving *redistributed* mass concentrates, NOT absolute
+  cellularity (we iterate T, not M; g/contraction is dropped per the readouts CONTRACT).
+  The CSF-dominance is surprising and UNVERIFIED -- cross-check against
+  circulation_analysis / recirculation steady-state before trusting it.
+
+  Assumption on the forecast leg: the late (T5->T6) operator persists (time-homogeneous
+  from T6 on). Drift is decreasing but nonzero, so read it as "if current dynamics hold".
+
+  KNOWN ISSUES to fix in this script:
+    - Observed dots (pooled composition) diverge from the model line in the observed
+      window because the pooled composition includes clone TURNOVER (new clones each
+      timepoint), which pure operator-iteration does not model. Dots are a loose
+      reference, not a target -- drop or relabel.
+    - Panel C past T6: the point line sits ~0 but the band sits ~0.08-0.14, because
+      every draw's distance is measured to the POINT-estimate steady state. That band
+      is posterior uncertainty on WHERE the steady state is, not convergence spread.
+      Fix: measure each draw vs its OWN steady state (band -> 0), show fixed-point
+      uncertainty separately as +/- on the dashed steady lines.
+=============================================================================
 """
 import os
 
